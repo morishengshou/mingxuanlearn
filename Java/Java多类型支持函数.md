@@ -71,6 +71,8 @@ public static double average(double... nums) { ... }
 如需进一步举例或扩展，欢迎继续提问！
 
 
+# 能否使用泛型解决问题
+
 这是个很有代表性的问题！**Java 的泛型（Generics）**主要用于类和方法的类型参数化，但**泛型不支持基本数据类型（如 `int`, `long`, `float`, `double`）**，只能用它们的包装类型（如 `Integer`, `Long`, `Float`, `Double`）。而且，泛型不支持类型约束，比如“只能是数值类型”，只能限定为某个类的子类。
 
 你**可以写一个泛型方法，参数类型为 `T extends Number`**，然后用 `Number` 的方法（如 `doubleValue()`）统一获取数值，来实现对多种数值类型的兼容。这样可以处理 `Integer`, `Long`, `Float`, `Double` 等包装类数组或集合。
@@ -121,3 +123,4 @@ public class AverageCalculator {
 ---
 
 如需更通用的范型写法或支持集合（`List`），可以继续提问！
+
