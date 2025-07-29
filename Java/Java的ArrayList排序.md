@@ -141,3 +141,139 @@ Collections.sort(items, Comparator.comparing(Item::getProduct)
    ```
 
 3. **性能考虑**：对于大量数据，排序的时间复杂度是O(n log n)。如果需要保持元素始终有序，可以考虑使用TreeSet或PriorityQueue等数据结构。
+
+# 为什么推荐使用comparator
+
+*Thinking...*
+
+> 用户问为什么推荐使用Comparator而不是Comparable。这是一个很好的问题，需要从多个角度来解释Comparator相对于Comparable的优势。我需要清楚地说明两者的区别和各自的使用场景。
+
+推荐使用Comparator主要有以下几个重要原因：
+
+## 1. **灵活性更高**
+
+Comparator允许你为同一个类定义多种排序方式，而Comparable只能定义一种"自然排序"。
+
+```java
+// 可以根据不同需求创建多个Comparator
+Comparator<Item> byProduct = Comparator.comparing(Item::getProduct);
+Comparator<Item> byManufacture = Comparator.comparing(Item::getManufacture);
+Comparator<Item> byPriceDesc = Comparator.comparing(Item::getPrice).reversed();
+
+// 根据不同场景使用不同的排序
+items.sort(byProduct);  // 按产品名排序
+items.sort(byManufacture);  // 按制造商排序
+items.sort(byPriceDesc);  // 按价格降序排序
+```
+
+## 2. **不需要修改原始类**
+
+使用Comparator时，你不需要修改目标类的源代码。这在以下情况特别有用：
+- 使用第三方库的类
+- 类已经实现了Comparable但你需要不同的排序方式
+- 遵循开闭原则（对扩展开放，对修改关闭）
+
+```java
+// 对于无法修改的String类，可以自定义排序
+Comparator<String> byLength = Comparator.comparing(String::length);
+List<String> words = Arrays.asList("apple", "pie", "banana");
+words.sort(byLength);  // 按长度排序
+```
+
+## 3. **更好的代码组织**
+
+Comparator可以让排序逻辑与业务实体分离，使代码更清晰：
+
+```java
+// 业务实体类保持简洁
+class Product {
+    private String name;
+    private double price;
+    private String category;
+    // getter, setter...
+}
+
+// 排序逻辑单独管理
+class ProductComparators {
+    public static final Comparator<Product> BY_NAME = 
+        Comparator.comparing(Product::getName);
+    
+    public static final Comparator<Product> BY_PRICE = 
+        Comparator.comparing(Product::getPrice);
+    
+    public static final Comparator<Product> BY_CATEGORY_THEN_PRICE = 
+        Comparator.comparing(Product::getCategory)
+                  .thenComparing(Product::getPrice);
+}
+```
+
+## 4. **函数式编程支持**
+
+Java 8引入的函数式特性让Comparator使用更加便捷：
+
+```java
+// 链式调用
+items.sort(Comparator.comparing(Item::getProduct)
+                     .thenComparing(Item::getManufacture)
+                     .thenComparingDouble(Item::getPrice));
+
+// 反转排序
+items.sort(Comparator.comparing(Item::getPrice).reversed());
+
+// null值处理
+items.sort(Comparator.comparing(Item::getProduct, 
+                               Comparator.nullsFirst(String::compareTo)));
+```
+
+## 5. **动态排序需求**
+
+Comparator可以根据运行时条件动态选择排序方式：
+
+```java
+public void sortItems(List<Item> items, String sortBy, boolean ascending) {
+    Comparator<Item> comparator = switch (sortBy) {
+        case "product" -> Comparator.comparing(Item::getProduct);
+        case "manufacture" -> Comparator.comparing(Item::getManufacture);
+        case "price" -> Comparator.comparing(Item::getPrice);
+        default -> throw new IllegalArgumentException("Unknown sort field");
+    };
+    
+    if (!ascending) {
+        comparator = comparator.reversed();
+    }
+    
+    items.sort(comparator);
+}
+```
+
+## 6. **单一职责原则**
+
+使用Comparator符合单一职责原则：
+- 实体类只负责数据和业务逻辑
+- 排序逻辑由专门的Comparator负责
+
+## 何时使用Comparable？
+
+Comparable仍然有其适用场景：
+- 类有明确的、唯一的自然排序方式（如Integer、String、Date）
+- 这种排序方式是类的固有属性
+- 需要在TreeSet、TreeMap等需要自然排序的集合中使用
+
+```java
+// 适合实现Comparable的例子
+class Version implements Comparable<Version> {
+    private int major;
+    private int minor;
+    private int patch;
+    
+    @Override
+    public int compareTo(Version other) {
+        // 版本号有明确的自然排序规则
+        if (major != other.major) return Integer.compare(major, other.major);
+        if (minor != other.minor) return Integer.compare(minor, other.minor);
+        return Integer.compare(patch, other.patch);
+    }
+}
+```
+
+总的来说，Comparator提供了更大的灵活性和更好的可维护性，特别适合在业务开发中使用，这就是为什么推荐优先考虑使用Comparator的原因。
