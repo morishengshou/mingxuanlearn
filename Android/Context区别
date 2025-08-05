@@ -1,0 +1,83 @@
+*Thinking...*
+
+> 用户询问如何获取Application Context，我需要提供几种常用的获取方法，并说明各自的使用场景和注意事项。
+
+在Android开发中，有多种方式可以获取Application Context：
+
+**1. 在Activity或Service中获取**
+
+最常见的方式是调用`getApplicationContext()`方法：
+
+```java
+Context appContext = getApplicationContext();
+```
+
+或者在Kotlin中：
+```kotlin
+val appContext = applicationContext
+```
+
+**2. 通过Context对象获取**
+
+如果你已经有一个Context对象（可能是Activity Context），可以通过它获取Application Context：
+
+```java
+Context appContext = context.getApplicationContext();
+```
+
+**3. 自定义Application类**
+
+这是一种很常用的方式，创建一个继承自Application的类，并提供静态方法获取实例：
+
+```java
+public class MyApplication extends Application {
+    private static MyApplication instance;
+    
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        instance = this;
+    }
+    
+    public static Context getContext() {
+        return instance;
+    }
+}
+```
+
+然后在AndroidManifest.xml中注册：
+```xml
+<application
+    android:name=".MyApplication"
+    ...>
+</application>
+```
+
+使用时直接调用：
+```java
+Context appContext = MyApplication.getContext();
+```
+
+**4. 在View中获取**
+
+View类提供了getContext()方法，但这通常返回的是Activity Context。要获取Application Context，需要：
+
+```java
+Context appContext = view.getContext().getApplicationContext();
+```
+
+**5. ContentProvider中获取**
+
+在ContentProvider中，可以直接使用getContext()方法，它返回的就是Application Context：
+
+```java
+Context appContext = getContext();
+```
+
+**注意事项**：
+
+- 在使用自定义Application类的静态方法时，要注意内存泄漏的风险，确保不要在Application类中持有Activity的引用
+- 某些情况下（如BroadcastReceiver的onReceive方法），传入的Context可能已经是Application Context
+- 在单元测试中，可能需要mock Application Context
+
+选择哪种方式取决于你的具体使用场景，但最重要的是要明确你需要的是Application Context还是Activity Context，并正确使用它们。
