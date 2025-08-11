@@ -162,3 +162,96 @@ eventBus.register(event -> {
 ---
 
 如需具体场景代码分析，欢迎继续提问！
+
+这是 Android 多线程开发中非常重要的一个问题。**Runnable 匿名内部类**与 **Lambda 表达式**在防止内存泄漏方面其实没有本质区别，但实际使用时会因“持有外部类引用”的方式导致泄漏风险不同。下面详细分析：
+
+---
+
+## **1. Runnable 匿名内部类**
+
+**写法示例：**
+```java
+// 假设在 Activity 里
+handler.postDelayed(new Runnable() {
+    @Override
+    public void run() {
+        // 引用了外部 Activity
+        someMethod();
+    }
+}, 10000);
+```
+
+**泄漏原理：**
+- 匿名内部类会自动持有外部类（这里是 Activity）的“隐式引用”。
+- 如果 Runnable 任务还没执行，Activity 却被销毁，此 Runnable 仍持有 Activity 的引用，导致 Activity 不能被及时回收，发生**内存泄漏**。
+
+---
+
+## **2. Lambda 表达式**
+
+**写法示例：**
+```java
+handler.postDelayed(() -> {
+    // 也会引用外部 Activity
+    someMethod();
+}, 10000);
+```
+
+**泄漏原理：**
+- Lambda 表达式在实现 Runnable 时，如果引用了外部类成员，其本质上也会**持有外部类引用**。
+- 所以 Lambda 与匿名内部类在引用捕获和内存泄漏风险上是**等价的**。
+
+---
+
+## **3. 具名静态内部类防泄漏写法**
+
+这才是推荐的防泄漏写法：
+
+```java
+static class MyRunnable implements Runnable {
+    private final WeakReference<Activity> activityRef;
+    MyRunnable(Activity activity) {
+        this.activityRef = new WeakReference<>(activity);
+    }
+    @Override
+    public void run() {
+        Activity activity = activityRef.get();
+        if (activity != null) {
+            activity.someMethod();
+        }
+    }
+}
+```
+
+- **静态内部类**不持有外部类引用。
+- 使用**弱引用**包装 Activity，有效防止泄漏。
+
+---
+
+## **结论**
+
+- **匿名内部类**和**Lambda表达式**本质上都容易因捕获外部引用（如 Activity、Fragment）而导致内存泄漏。
+- **哪种写法都不比另一种更安全！**  
+  关键在于：**是否持有了生命周期较短对象的强引用，以及任务是否会长时间存活。**
+- **推荐防泄漏方法**：  
+  - 使用**静态内部类**+**弱引用**。
+  - 或者在回调前判断外部对象是否已销毁。
+
+---
+
+## **实战建议**
+
+- 少用匿名/非静态内部类作为长生命周期任务的 Runnable（如 Handler.postDelayed）。
+- 用 Lambda 时也要注意引用捕获问题。
+- Handler/Thread 退出时及时移除所有回调和消息。
+
+---
+
+### **一句话结论**
+
+> **Runnable 匿名内部类和 Lambda 表达式在内存泄漏风险上一样，关键看你有没有捕获外部类引用。安全写法应使用静态内部类+弱引用。**
+
+---
+
+如果需要具体的防泄漏模板代码或场景分析，可以继续提问！
+
