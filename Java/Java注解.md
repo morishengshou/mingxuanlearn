@@ -215,3 +215,215 @@ Gradle 依赖（示意）：
 - 根据你的具体业务场景，帮你设计注解与处理器的 API。
 - 给出可直接运行的 Gradle/Maven 最小工程骨架。
 - 演示如何用 javap 观察 class 文件中的注解属性，以及如何在处理器中读取复杂注解值。
+
+# 如何自定义注解
+
+下面给你一份从零开始的“自定义 Java 注解”速成指南：怎么定义、怎么用、怎么在运行期/编译期处理，以及注意事项与示例代码。
+
+一、定义一个注解的基本步骤
+1) 选择用途
+- 运行期让框架/反射读取（如 Spring、JAX‑RS）。
+- 编译期做校验或代码生成（如 Dagger、MapStruct、自定义处理器）。
+- 仅文档/警告辅助（如 @Override、@SuppressWarnings）。
+
+2) 选定元注解
+- @Retention：SOURCE | CLASS | RUNTIME（决定保留到何处）
+- @Target：限制能标注到哪些元素（类、方法、字段、参数、类型使用等）
+- @Documented：被 Javadoc 收录
+- @Inherited：类上的注解对子类可见（仅类，非方法/字段）
+- @Repeatable：允许重复标注（需容器注解）
+
+3) 编写 @interface
+- 注解元素的合法类型：
+  - 基本类型、String、Class（可写 Class<? extends X>）、枚举、其他注解、以及这些类型的一维数组
+- 元素不可为 null；可用默认值或空数组表示“可选”
+- 可将元素名定义为 value，这样使用时可省略键名
+
+示例：一个可运行时读取的业务注解
+```java
+import java.lang.annotation.*;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ElementType.TYPE, ElementType.METHOD, ElementType.FIELD})
+@Documented
+public @interface Tag {
+    String value();          // 必填元素
+    int level() default 1;   // 可选，默认值
+}
+```
+
+二、注解的使用方式
+```java
+@Tag("service")                 // 等价于 @Tag(value = "service")
+public class OrderService {
+
+    @Tag(value = "endpoint", level = 2)
+    public void create() {}
+
+    @Tag("config")
+    private String region;
+}
+```
+
+- 数组元素示例：roles = {"admin", "ops"}，单元素也可写 roles = "admin"
+- 嵌套注解、枚举、Class 示例：
+```java
+enum Env { DEV, PROD }
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Config {
+    Env env();
+    Class<? extends Runnable> runner();
+    SuppressWarnings suppress();   // 嵌套注解
+    String[] features() default {};
+}
+```
+
+三、重复注解与类型注解
+- 重复注解
+```java
+import java.lang.annotation.*;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@Repeatable(Roles.class)
+@interface Role { String value(); }
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+@interface Roles { Role[] value(); }
+
+// 使用
+@Role("admin")
+@Role("ops")
+class User {}
+
+// 读取
+Role[] roles = User.class.getAnnotationsByType(Role.class);
+```
+
+- 类型注解（Type Use）
+```java
+@Target(ElementType.TYPE_USE)
+@Retention(RetentionPolicy.CLASS)  // 给静态分析或字节码工具
+@interface NonNull {}
+
+java.util.List<@NonNull String> names;
+String s = (@NonNull String) obj;
+```
+
+四、运行期读取（反射）
+要用反射读取，Retention 必须是 RUNTIME。
+```java
+import java.lang.reflect.AnnotatedElement;
+
+Tag t1 = OrderService.class.getAnnotation(Tag.class);
+Tag t2 = OrderService.class.getDeclaredAnnotation(Tag.class);
+Tag[] all = OrderService.class.getAnnotationsByType(Tag.class); // 兼容重复注解
+
+// 读取方法/字段
+var m = OrderService.class.getDeclaredMethod("create");
+Tag mt = m.getAnnotation(Tag.class);
+```
+
+五、编译期处理（JSR 269 注解处理器，代码生成/校验）
+如果注解只为了编译期使用，设为 SOURCE 或 CLASS，更轻量。下面给一个最小可用示例：用注解触发生成一个“问候类”。
+
+1) 定义注解（单独的 annotations 模块/包）
+```java
+package demo.anno;
+import java.lang.annotation.*;
+
+@Retention(RetentionPolicy.SOURCE)
+@Target(ElementType.TYPE)
+public @interface AutoHello {
+    String value() default "Hello";
+}
+```
+
+2) 编写处理器（processor 模块）
+```java
+package demo.processor;
+
+import demo.anno.AutoHello;
+import javax.annotation.processing.*;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.*;
+import javax.tools.Diagnostic;
+import javax.tools.JavaFileObject;
+import java.io.Writer;
+import java.util.Set;
+
+@SupportedSourceVersion(SourceVersion.RELEASE_17)
+@SupportedAnnotationTypes("demo.anno.AutoHello")
+public class AutoHelloProcessor extends AbstractProcessor {
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+        for (Element e : roundEnv.getElementsAnnotatedWith(AutoHello.class)) {
+            if (e.getKind() != ElementKind.CLASS) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
+                        "@AutoHello 只能用于类", e);
+                continue;
+            }
+            TypeElement type = (TypeElement) e;
+            String pkg = processingEnv.getElementUtils().getPackageOf(type).getQualifiedName().toString();
+            String simpleName = type.getSimpleName() + "Hello";
+            String greet = type.getAnnotation(AutoHello.class).value(); // 读取注解值
+
+            String fqcn = (pkg.isEmpty() ? "" : pkg + ".") + simpleName;
+
+            try {
+                JavaFileObject file = processingEnv.getFiler().createSourceFile(fqcn, type);
+                try (Writer w = file.openWriter()) {
+                    w.write("package " + pkg + ";\n");
+                    w.write("public class " + simpleName + " {\n");
+                    w.write("  public static String greet() { return \"" + greet + ", from processor!\"; }\n");
+                    w.write("}\n");
+                }
+            } catch (Exception ex) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, ex.getMessage(), e);
+            }
+        }
+        return true;
+    }
+}
+```
+
+3) 注册处理器（resources/META-INF/services/javax.annotation.processing.Processor）
+```
+demo.processor.AutoHelloProcessor
+```
+
+4) 使用注解（在业务模块）
+```java
+import demo.anno.AutoHello;
+
+@AutoHello("Hi")
+public class App {}
+
+// 编译后会生成 AppHello 类：
+// String s = AppHello.greet(); // "Hi, from processor!"
+```
+
+构建提示：
+- 处理器与注解通常分成两个 artifact：使用方只依赖“注解”，在 annotationProcessor 配置中引入“处理器”
+- Gradle（示意）：
+  - implementation("group:annotations:1.0")
+  - annotationProcessor("group:processor:1.0")
+
+六、选择 Retention 的建议
+- 仅编译期用：SOURCE（不进 class，产物最小）
+- 运行时要反射读取：RUNTIME
+- CLASS：较少单独使用，主要给字节码工具或后处理器
+
+七、常见注意点
+- 注解元素不能为 null；用默认值或空数组表达“缺省”
+- 元素值必须是编译期常量或字面量（new 语句不行）
+- @Inherited 只对“类上的注解”有效，方法/字段不会“继承”
+- 重复注解必须定义容器注解，并用 @Repeatable 标注
+- 生成代码时使用 Filer 并传入 originating elements，利于增量编译
+- 反射只能看到 RUNTIME 注解；CLASS 策略的注解虽写入 class，但反射不可见
+
+如果你给我你的应用场景（运行期读取还是编译期生成、标注在哪些元素、需要哪些参数），我可以为你定制注解设计和最小可运行示例工程（Gradle/Maven 两种都可以）。
