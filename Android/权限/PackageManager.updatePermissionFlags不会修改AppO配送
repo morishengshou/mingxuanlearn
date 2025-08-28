@@ -1,0 +1,28 @@
+短答：不会。仅调用 PackageManager 的 updatePermissionFlags（或同类仅改 flag 的路径）不会自动调整对应 AppOps 的 mode。AppOps 的联动更新只在“授予/撤销权限”的正式路径里发生；单改 flag 不触发。
+
+要点说明
+- updatePermissionFlags 的作用
+  - 它只更新某个“应用-权限”的状态标志位（如 USER_FIXED、POLICY_FIXED、SYSTEM_FIXED、GRANTED_BY_DEFAULT、RESTRICTION_UPGRADABLE 等）。
+  - 这些 flag 描述“授予状态的来源/可变性/显示行为”，本身不等于“授予或撤销”。
+
+- AppOps 联动何时发生
+  - 当通过标准授予/撤销入口变更权限（如 PermissionManagerService.grantRuntimePermission()/revokeRuntimePermission()，Settings 的授权页面、运行时弹窗、DevicePolicyManager.setPermissionGrantState()、adb pm grant/revoke）时，框架会调用 AppOpsService 将相关 op 设置为相应的 MODE（ALLOWED/DEFAULT/IGNORED/FOREGROUND 等）。
+  - 这条路径里同时会更新 permission 的授予位与必要的 flags。
+
+- 仅改 flag 不会触发 AppOps
+  - updatePermissionFlags 不改变 granted/denied 的布尔状态，因此 PermissionManager 不会去触碰 AppOps。
+  - 即使你把 POLICY_FIXED 设置成某种固定状态，除非你随后实际执行“grant/revoke”行为，否则 AppOps 不会变化。
+
+- 如果你“绕过授予路径”直接改内部状态
+  - 在系统/ROM场景下，如果你使用隐藏 API 仅改 flags 或内部存储，AppOps 不会自动同步；需要你显式调用 AppOpsManager.setMode()/setUidMode() 来对每个相关 op 设定期望的 mode。
+
+实践建议
+- 如需让权限效果真正改变（影响运行时行为），请走正式的授予/撤销 API，而不是只改 flag。
+- 系统/企业应用若必须单独改 flags，同时依据权限→AppOps 的映射，显式调整 AppOps：
+  - 示例（需系统权限）：
+    - 对应 op 名：AppOpsManager.permissionToOp(permission) 或手动映射到 OPSTR_*
+    - 设置模式：appOps.setMode(op, uid, packageName, AppOpsManager.MODE_ALLOWED/IGNORED/DEFAULT/FOREGROUND)
+- 变更后，用
+  - Context.checkSelfPermission() 校验授予状态
+  - AppOpsManager.checkOpNoThrow()/unsafeCheckOpNoThrow() 校验最终 mode
+以确保两侧一致。
