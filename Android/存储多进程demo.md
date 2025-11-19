@@ -936,3 +936,90 @@ public class MainActivity extends AppCompatActivity {
 - 提供基于 SAF 的 UsbIoWorker 实现（可运行在普通应用权限下，不依赖 /storage 直写）？
 - 提供纯线程版（不启动子进程，用线程池模拟 N 进程负载）？
 - 或者适配特定品牌 ROM 的存储策略（例如必须走 StorageManager/VolumeInfo 枚举 U 盘路径）？
+
+# 包名更改
+
+如果你改了应用的包名（例如从 com.example.usbstresstool 改为 com.acme.usbstress），需要同步改两处，确保命令行能正确找到入口类：
+
+1) 修改 CliMain.java 的 package 声明与类的完全限定名
+- 文件头部的 package 必须与新包名一致。
+- 例如原来：
+  package com.example.usbstresstool;
+  改为：
+  package com.acme.usbstress;
+
+- 文件中引用到入口类名的字符串常量（如果有）也要改。上面示例工程里有两处地方内含全限定类名：
+  - CliMain.buildSelfCommand(...) 里：
+    String className = "com.example.usbstresstool.CliMain";
+    改为：
+    String className = "com.acme.usbstress.CliMain";
+
+2) 修改 ProcUtils 中的入口类名
+- ProcUtils.startCliProcess(...) 里同样写死了入口类名：
+  String entry = "com.example.usbstresstool.CliMain";
+  改为：
+  String entry = "com.acme.usbstress.CliMain";
+
+命令行调用方式不变，但要确保 CLASSPATH 指向你 APK 的路径，并使用新的类名。示例：
+
+- 设备上通过 app_process 调用（在应用沙箱内或 adb shell）：
+  CLASSPATH=/data/app/你的包名-xxxx/base.apk app_process /system/bin com.acme.usbstress.CliMain --mount-path /storage/XXXX-XXXX --procs 4 --files 2 ...
+
+注意事项与排错要点
+- apk 路径：在应用内启动时，代码使用 Context.getPackageCodePath() 自动获取 base.apk 路径；若你在 adb shell 手工调用，需要先找到实际 apk 路径（不同设备路径可能略有差异）。可以用 pm path com.acme.usbstress 获取：
+  adb shell pm path com.acme.usbstress
+  输出如：package:/data/app/~~abcd1234==/com.acme.usbstress-xyz/base.apk
+  然后取冒号后面的路径作为 CLASSPATH。
+
+- 权限与用户：
+  - 在应用内调用 ProcUtils 会以应用 uid 运行，权限与 App 相同。
+  - 在 adb shell 下直调时，进程以 shell 用户运行，可能没有对 /storage/XXXX-XXXX 的写权限；如需测试，建议在应用内发起，或使用适合的存储路径策略（SAF 版本）。
+
+- 进程自举：
+  - CliMain.buildSelfCommand 会把 --procs 强制改为 1，并用 app_process 再次拉起自身类。这串 className 必须与当前包名一致，否则子进程会报 ClassNotFoundException。
+
+- 混淆/压缩：
+  - 若开启 R8/ProGuard，请把入口类保留不被裁剪：
+    -keep class com.acme.usbstress.CliMain { public static void main(...); }
+
+- 目标 SDK 和 POST_NOTIFICATIONS：
+  - 与命令行入口无关，但前台服务通知在 Android 13+ 可能需要动态授权。
+
+快速清单（你需要做的改动）
+- CliMain.java 顶部 package 改为新包名。
+- CliMain.buildSelfCommand 内 className 改为 新包名.CliMain。
+- ProcUtils.java 内 entry 改为 新包名.CliMain。
+-（可选）proguard-rules.pro 增加 keep 规则，防止 main 被移除。
+
+# 寻找base.apk路径 
+
+简短回答：
+- 是的，base.apk 是应用在设备端安装后的“主 split”APK 文件名。
+- 用 adb install 安装普通（非分包）的 APK 后，设备端通常会把它展开为 base.apk（以及可能的其他 split，如 config-xx.apk）。命令行里用的 CLASSPATH 就指向这个 base.apk。
+- 正确做法是不要自己猜路径，始终用 pm path 包名 去拿实际路径。
+
+详细说明：
+- 从 Android 5.0 起，系统支持 split APK。安装后，每个应用目录下会有一个或多个 split 文件，主 split 统一命名为 base.apk，其他按 split 名称命名（如 split_config.armeabi_v7a.apk、split_config.xxhdpi.apk 等）。
+- 无论你是通过 adb install app-release.apk 还是通过应用商店安装，设备端最终都会把应用文件放到 /data/app/.../ 下，并把主 split 命名为 base.apk。
+- 这个路径包含随机后缀，不能硬编码。例如：
+  adb shell pm path com.acme.usbstress
+  可能输出多行：
+  package:/data/app/~~abcd123.../com.acme.usbstress-xyz==/base.apk
+  package:/data/app/~~abcd123.../com.acme.usbstress-xyz==/split_config.arm64_v8a.apk
+  package:/data/app/~~abcd123.../com.acme.usbstress-xyz==/split_config.zh.apk
+- 你在命令行用 app_process 启动 Java 主类时，CLASSPATH 只需要包含主 dex 的 APK，一般就是 base.apk；如果你的代码或依赖被放到了其他 split（很少见，通常代码都在 base），也可以把多个 split 通过冒号拼接到 CLASSPATH。
+
+推荐调用步骤（adb shell 下）：
+1) 查路径
+   adb shell pm path com.acme.usbstress
+2) 取出 base.apk 路径（去掉前缀 package:）
+3) 调用
+   adb shell 'CLASSPATH=/data/app/~~.../base.apk app_process /system/bin com.acme.usbstress.CliMain --args...'
+
+在应用内启动子进程的情况：
+- 代码里通常用 Context.getPackageCodePath() 获取当前应用主 APK 的完整路径，它返回的就是 base.apk 的实际路径，无需你关心分包和随机目录。
+
+常见坑：
+- 不同 Android 版本、厂商路径格式略不同，务必依赖 pm path。
+- 权限差异：adb shell 进程是 shell 用户，不一定能写外部存储的某些挂载点；应用内拉起子进程则拥有应用的同等权限。
+- ProGuard/R8 可能裁剪 main 方法，记得 keep 入口类。
