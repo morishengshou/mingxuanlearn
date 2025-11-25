@@ -103,3 +103,98 @@ sudo systemctl reload nginx
    - 浏览器是否缓存了旧资产，可在 Odoo 后台清空资产或清理浏览器缓存。
 
 这样配置后，即使有两层 Nginx，Odoo 也会认定自己运行在 `/dtdashboardbg` 子路径下，从而所有内部跳转、静态资源、通知链接都会自动带上该前缀。
+
+# 第一层nginx配置
+下面给出在“第一层”网关（位于 example.com 前端、只负责把 `/dtdashboardbg/` 路径转发到你服务器 8069 端口）的 Nginx 配置示例。此示例假设：
+
+- 域名：`example.com`
+- 第一层网关只做转发，不跑 Odoo。
+- 你的服务器 IP：`203.0.113.10`（请替换为实际地址），在 8069 端口上运行第二层 Nginx。
+- 第一层希望统一加上 `X-Forwarded-*` 信息和前缀。
+
+```nginx
+# /etc/nginx/conf.d/gateway-odoo.conf
+
+upstream odoo_backend {
+    server 203.0.113.10:8069;
+}
+
+server {
+    listen 80;
+    server_name example.com;
+
+    # 若需要 HTTPS，可把 listen 换成 443 ssl 并配置证书，再在 80 上做重定向。
+
+    # 把 /dtdashboardbg/ 下的所有请求转发到后端
+    location ^~ /dtdashboardbg/ {
+        proxy_pass http://odoo_backend;
+        # 注意：这里不在 proxy_pass 末尾加 /，因为我们希望把完整路径（含 /dtdashboardbg）原样送给后端，
+        # 让后端 Nginx 接着处理并继续保留前缀。
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # 告诉后端本次请求的前缀（便于最终传递到 Odoo）
+        proxy_set_header X-Forwarded-Prefix /dtdashboardbg;
+
+        proxy_redirect off;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
+    # 可选：其他路径由网关自行处理或返回 404
+    location / {
+        return 404;
+    }
+}
+```
+
+### 关键说明
+
+1. **路径保留**  
+   - 因为第二层 Nginx 还要根据 `/dtdashboardbg/` 路径去匹配、再写入 `X-Forwarded-Prefix`，所以这里的 `proxy_pass` 没有以 `/` 结尾，表示把原始路径完整转发过去。
+
+2. **前缀头信息**  
+   - `proxy_set_header X-Forwarded-Prefix /dtdashboardbg;` 虽可在第二层再设置一次，但提前加上能确保即使第二层漏配，Odoo 仍能拿到正确的前缀。
+
+3. **长轮询**  
+   - 如果第一层需要单独优化长轮询（例如 `/dtdashboardbg/longpolling/`），可以另建一个 `location`，或保持当前配置（因为第二层已经针对该路径做了专门处理）。示例：
+
+     ```nginx
+     location ^~ /dtdashboardbg/longpolling/ {
+         proxy_pass http://odoo_backend;
+         proxy_set_header Host $host;
+         proxy_set_header X-Forwarded-Host $host;
+         proxy_set_header X-Forwarded-Proto $scheme;
+         proxy_set_header X-Forwarded-Port $server_port;
+         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+         proxy_set_header X-Forwarded-Prefix /dtdashboardbg;
+
+         proxy_redirect off;
+         proxy_http_version 1.1;
+         proxy_set_header Connection "";
+         proxy_buffering off;   # 长轮询建议关闭缓冲
+     }
+     ```
+
+4. **HTTPS**  
+   - 生产环境建议开启 HTTPS。可在 443 端口配置证书并监听，80 端口做 301 跳转：
+     ```nginx
+     server {
+         listen 80;
+         server_name example.com;
+         return 301 https://$host$request_uri;
+     }
+     ```
+
+配置完成后，重载第一层 Nginx：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+这套配置确保第一层网关把带有 `/dtdashboardbg/` 的所有请求完整地、带上必要头信息地流转到你的服务器，从而第二层 Nginx 与 Odoo 能继续识别该前缀并生成正确的链接。
