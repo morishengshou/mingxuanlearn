@@ -198,3 +198,30 @@ sudo systemctl reload nginx
 ```
 
 这套配置确保第一层网关把带有 `/dtdashboardbg/` 的所有请求完整地、带上必要头信息地流转到你的服务器，从而第二层 Nginx 与 Odoo 能继续识别该前缀并生成正确的链接。
+
+# 不配置upstream块
+
+可以的，`proxy_pass` 完全可以直接指向具体的 IP（或域名），并不一定要先定义 `upstream`。例如：
+
+```nginx
+location ^~ /dtdashboardbg/ {
+    proxy_pass http://203.0.113.10:8069;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Port $server_port;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Prefix /dtdashboardbg;
+    proxy_redirect off;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+```
+
+### 什么时候需要 `upstream`
+- **负载均衡或多后端**：你想在多台服务器之间做轮询、`ip_hash` 等策略时，需要使用 `upstream`。
+- **长连接/keepalive**：`upstream` 块可配置 `keepalive`，减少建立 TCP 连接的开销。
+- **可读性/维护性**：统一的后端地址方便集中管理、重复引用。
+
+如果只是单一 IP、端口，没有上述需求，直接在 `proxy_pass` 中写死地址即可，功能上没有问题。
+
