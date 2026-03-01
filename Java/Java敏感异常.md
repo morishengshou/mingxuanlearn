@@ -1,0 +1,26 @@
+**Java的敏感异常主要指那些如果直接暴露给用户，可能会泄露系统敏感信息（如路径、结构、数据库名）或被用于DDoS攻击的异常**，包括FileNotFoundException、SQLException、BindException、OutOfMemoryError等。在安全编码中，这些异常应当被捕获、隐藏并用通用的错误信息替换。 
+CSDN博客
+CSDN博客
+ +3
+常见Java敏感异常及其安全风险
+文件系统与结构泄露
+java.io.FileNotFoundException：暴露敏感的文件路径和文件名。
+java.util.jar.JarException：暴露系统结构。
+资源与信息枚举
+java.sql.SQLException：揭露数据库结构、表名、列名、用户名甚至SQL语句。
+java.util.MissingResourceException：暴露资源名称，导致资源枚举。
+java.security.acl.NotOwnerException：暴露所有者信息。
+服务拒绝（DoS）攻击风险
+java.lang.OutOfMemoryError：如果被滥用可能耗尽内存，导致系统崩溃。
+java.lang.StackOverflowError：因递归过深等导致栈溢出，可能被用于攻击。
+javax.naming.InsufficientResourcesException：资源不足异常。
+网络配置泄露
+java.net.BindException：暴露服务器开放的端口，导致端口列举。 
+CSDN博客
+CSDN博客
+ +4
+防御建议
+统一异常处理：在Controller层使用@ControllerAdvice或拦截器捕获所有异常。
+隐藏内部信息：切勿将e.getMessage()或e.printStackTrace()的内容直接返回给客户端。
+返回泛化错误：将敏感异常替换为通用提示，例如“系统异常，请稍后再试”。
+记录安全日志：内部日志记录详细堆栈以便排查，但对外只展示安全信息。
