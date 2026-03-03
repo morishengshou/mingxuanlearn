@@ -143,3 +143,144 @@ public class TableDrivenNoReflectionDemo {
 - **便于做通用能力**：鉴权、日志、限流、异常统一处理等可以放到 `dispatch` 或加“拦截器链”。
 
 如果你希望更规范一点（比如强类型参数 DTO、参数校验、返回码/错误码体系、或支持“中间件/拦截器”），我也可以在这个基础上再升级一版。你命令参数来源是 HTTP（Spring MVC）、消息队列，还是命令行？
+
+# String类型表驱动
+
+下面是**参数全部是 `String`**、**不使用反射**、仍然“表驱动替代 if-else”的可运行示例。思路是用：
+
+- `Map<String, Function<Request, Response>>`（统一入参/返回）
+- `Request` 里只存 `Map<String, String>`
+
+保存为 `StringOnlyTableDrivenDemo.java` 运行即可。
+
+```java
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Function;
+
+public class StringOnlyTableDrivenDemo {
+
+    // 统一入参：全部 String
+    public static class Request {
+        private final String command;
+        private final Map<String, String> params;
+
+        public Request(String command, Map<String, String> params) {
+            this.command = command;
+            this.params = (params == null) ? new HashMap<>() : params;
+        }
+
+        public String command() { return command; }
+
+        public String get(String key) { return params.get(key); }
+
+        public String require(String key) {
+            String v = params.get(key);
+            if (v == null || v.isBlank()) {
+                throw new IllegalArgumentException("missing param: " + key);
+            }
+            return v;
+        }
+
+        public int requireInt(String key) {
+            String v = require(key);
+            try {
+                return Integer.parseInt(v.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("param '" + key + "' is not int: " + v);
+            }
+        }
+
+        // 便捷构造：Request.of("ECHO", "msg", "hi", "x", "1")
+        public static Request of(String command, String... kv) {
+            if (kv.length % 2 != 0) {
+                throw new IllegalArgumentException("kv must be even length: key,value,...");
+            }
+            Map<String, String> p = new HashMap<>();
+            for (int i = 0; i < kv.length; i += 2) {
+                p.put(kv[i], kv[i + 1]);
+            }
+            return new Request(command, p);
+        }
+    }
+
+    // 统一返回
+    public static class Response {
+        public final boolean ok;
+        public final String message;
+        public final String data; // 这里也用 String，方便演示
+
+        private Response(boolean ok, String message, String data) {
+            this.ok = ok;
+            this.message = message;
+            this.data = data;
+        }
+
+        public static Response ok(String data) { return new Response(true, "OK", data); }
+        public static Response fail(String msg) { return new Response(false, msg, null); }
+
+        @Override
+        public String toString() {
+            return "Response{ok=" + ok + ", message='" + message + "', data='" + data + "'}";
+        }
+    }
+
+    // 表驱动分发器
+    public static class Dispatcher {
+        private final Map<String, Function<Request, Response>> table = new HashMap<>();
+
+        public Dispatcher register(String cmd, Function<Request, Response> handler) {
+            table.put(cmd, handler);
+            return this;
+        }
+
+        public Response dispatch(Request req) {
+            Function<Request, Response> h = table.get(req.command());
+            if (h == null) return Response.fail("Unknown command: " + req.command());
+            try {
+                return h.apply(req);
+            } catch (Exception e) {
+                return Response.fail("Bad request: " + e.getMessage());
+            }
+        }
+    }
+
+    // 业务处理（全部参数从 Request 取 String）
+    public static class Service {
+        public Response hello(Request req) {
+            return Response.ok("hello");
+        }
+
+        public Response echo(Request req) {
+            String msg = req.require("msg");
+            return Response.ok("echo: " + msg);
+        }
+
+        public Response add(Request req) {
+            int a = req.requireInt("a");
+            int b = req.requireInt("b");
+            return Response.ok(String.valueOf(a + b));
+        }
+    }
+
+    public static void main(String[] args) {
+        Service service = new Service();
+
+        Dispatcher dispatcher = new Dispatcher()
+                .register("HELLO", service::hello)
+                .register("ECHO",  service::echo)
+                .register("ADD",   service::add);
+
+        System.out.println(dispatcher.dispatch(Request.of("HELLO")));
+        System.out.println(dispatcher.dispatch(Request.of("ECHO", "msg", "only string params")));
+        System.out.println(dispatcher.dispatch(Request.of("ADD", "a", "10", "b", "20")));
+
+        // 错误示例：缺参/格式不对/未知命令
+        System.out.println(dispatcher.dispatch(Request.of("ADD", "a", "x", "b", "2")));
+        System.out.println(dispatcher.dispatch(Request.of("ECHO"))); // msg 缺失
+        System.out.println(dispatcher.dispatch(Request.of("UNKNOWN")));
+    }
+}
+```
+
+如果你的“参数只是 String”其实是**只有一个 String 入参**（比如 `command` + `payload`），也可以简化成 `Map<String, Function<String, String>>`。你更倾向哪种：`key-value` 参数表，还是单一 payload 字符串？
