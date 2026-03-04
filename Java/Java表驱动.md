@@ -77,8 +77,182 @@ public class StringFunctionDispatchDemo {
 - 用 `Runnable` / `Consumer` / `BiFunction` 的对比版本
 - 结合 Spring（如 `@Component + Map` 自动注入）做企业项目常用实现。
 
+# 优化版本
 
+*Thinking...*
 
+> **Providing optimized comparison code**
+
+太好了 👍  
+下面给你一个“**优化 + 对比**”版本：一次性演示 `if-else`、`Map + Function(getOrDefault)`、`Map + Consumer`、`Map + BiFunction` 四种写法。
+
+你可以直接复制运行（一个文件就行）。
+
+```java
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+
+public class DispatchCompareDemo {
+
+    // ===== 通用请求对象 =====
+    static class Request {
+        String user;
+        int amount;
+
+        Request(String user, int amount) {
+            this.user = user;
+            this.amount = amount;
+        }
+
+        @Override
+        public String toString() {
+            return "Request{user='" + user + "', amount=" + amount + "}";
+        }
+    }
+
+    // ===== 1) 传统 if-else 写法 =====
+    static class IfElseDispatcher {
+        public String dispatch(String action, Request req) {
+            String act = normalize(action);
+
+            if ("CREATE".equals(act)) {
+                return "IF_ELSE -> 创建用户成功: " + req.user;
+            } else if ("PAY".equals(act)) {
+                return "IF_ELSE -> 扣款成功: " + req.user + "，金额=" + req.amount;
+            } else if ("REFUND".equals(act)) {
+                return "IF_ELSE -> 退款成功: " + req.user + "，金额=" + req.amount;
+            } else {
+                return "IF_ELSE -> 未知操作: " + action;
+            }
+        }
+    }
+
+    // ===== 2) 推荐：Map + Function + getOrDefault（有返回值） =====
+    static class FunctionDispatcher {
+        private final Map<String, Function<Request, String>> handlers = new HashMap<>();
+
+        // 默认处理器，避免 null 判断
+        private final Function<Request, String> defaultHandler =
+                req -> "FUNCTION -> 未知操作，入参: " + req;
+
+        public FunctionDispatcher() {
+            register("CREATE", req -> "FUNCTION -> 创建用户成功: " + req.user);
+            register("PAY", req -> "FUNCTION -> 扣款成功: " + req.user + "，金额=" + req.amount);
+            register("REFUND", req -> "FUNCTION -> 退款成功: " + req.user + "，金额=" + req.amount);
+        }
+
+        public void register(String action, Function<Request, String> handler) {
+            handlers.put(normalize(action), handler);
+        }
+
+        public String dispatch(String action, Request req) {
+            return handlers
+                    .getOrDefault(normalize(action), defaultHandler)
+                    .apply(req);
+        }
+    }
+
+    // ===== 3) Map + Consumer（无返回值，偏“执行动作”） =====
+    static class ConsumerDispatcher {
+        private final Map<String, Consumer<Request>> handlers = new HashMap<>();
+
+        private final Consumer<Request> defaultHandler =
+                req -> System.out.println("CONSUMER -> 未知操作，入参: " + req);
+
+        public ConsumerDispatcher() {
+            register("CREATE", req -> System.out.println("CONSUMER -> 创建用户: " + req.user));
+            register("PAY", req -> System.out.println("CONSUMER -> 扣款: " + req.user + ", " + req.amount));
+            register("REFUND", req -> System.out.println("CONSUMER -> 退款: " + req.user + ", " + req.amount));
+        }
+
+        public void register(String action, Consumer<Request> handler) {
+            handlers.put(normalize(action), handler);
+        }
+
+        public void dispatch(String action, Request req) {
+            handlers.getOrDefault(normalize(action), defaultHandler).accept(req);
+        }
+    }
+
+    // ===== 4) Map + BiFunction（需要多个输入参数时更灵活） =====
+    static class BiFunctionDispatcher {
+        // 例子：额外传一个 traceId 作为第二个参数
+        private final Map<String, BiFunction<Request, String, String>> handlers = new HashMap<>();
+
+        private final BiFunction<Request, String, String> defaultHandler =
+                (req, traceId) -> "BIFUNCTION[" + traceId + "] -> 未知操作: " + req;
+
+        public BiFunctionDispatcher() {
+            register("CREATE", (req, traceId) ->
+                    "BIFUNCTION[" + traceId + "] -> 创建用户成功: " + req.user);
+            register("PAY", (req, traceId) ->
+                    "BIFUNCTION[" + traceId + "] -> 扣款成功: " + req.user + ", " + req.amount);
+            register("REFUND", (req, traceId) ->
+                    "BIFUNCTION[" + traceId + "] -> 退款成功: " + req.user + ", " + req.amount);
+        }
+
+        public void register(String action, BiFunction<Request, String, String> handler) {
+            handlers.put(normalize(action), handler);
+        }
+
+        public String dispatch(String action, Request req, String traceId) {
+            return handlers.getOrDefault(normalize(action), defaultHandler).apply(req, traceId);
+        }
+    }
+
+    // ===== 工具：统一处理大小写、空格 =====
+    private static String normalize(String action) {
+        return action == null ? "" : action.trim().toUpperCase();
+    }
+
+    // ===== 演示入口 =====
+    public static void main(String[] args) {
+        Request req1 = new Request("Alice", 0);
+        Request req2 = new Request("Bob", 100);
+        Request req3 = new Request("Cindy", 50);
+        Request req4 = new Request("David", 20);
+
+        System.out.println("=== 1) if-else ===");
+        IfElseDispatcher ifElse = new IfElseDispatcher();
+        System.out.println(ifElse.dispatch("create", req1));
+        System.out.println(ifElse.dispatch("pay", req2));
+        System.out.println(ifElse.dispatch("delete", req4));
+
+        System.out.println("\n=== 2) Map + Function（推荐） ===");
+        FunctionDispatcher functionDispatcher = new FunctionDispatcher();
+        System.out.println(functionDispatcher.dispatch("CREATE", req1));
+        System.out.println(functionDispatcher.dispatch("REFUND", req3));
+        System.out.println(functionDispatcher.dispatch("DELETE", req4));
+
+        System.out.println("\n=== 3) Map + Consumer（无返回值） ===");
+        ConsumerDispatcher consumerDispatcher = new ConsumerDispatcher();
+        consumerDispatcher.dispatch("pay", req2);
+        consumerDispatcher.dispatch("delete", req4);
+
+        System.out.println("\n=== 4) Map + BiFunction（多参数） ===");
+        BiFunctionDispatcher biFunctionDispatcher = new BiFunctionDispatcher();
+        System.out.println(biFunctionDispatcher.dispatch("REFUND", req3, "T-1001"));
+        System.out.println(biFunctionDispatcher.dispatch("UNKNOWN", req4, "T-1002"));
+    }
+}
+```
+
+---
+
+### 怎么选（实战建议）
+
+- **有返回值**：优先 `Map<String, Function<Req, Resp>>`  
+- **只执行动作，不关心返回**：`Map<String, Consumer<Req>>`  
+- **需要多个输入参数**：`BiFunction` / 自定义函数式接口  
+- **高并发动态注册**：把 `HashMap` 换成 `ConcurrentHashMap`
+
+---
+
+如果你要，我下一步可以给你一个**Spring Boot 项目版**：  
+自动扫描每个 handler（按注解注册），启动时组装成 `Map`，业务层直接 `dispatch(action, req)`。这样最接近企业实际项目。
 
 下面给一个**不使用反射**、**统一入参对象**的“表驱动”可运行示例：用 `Map<String, Function<Request, Response>>` 来替代 `if-else/switch`。  
 
