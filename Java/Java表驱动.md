@@ -1,3 +1,85 @@
+*Thinking...*
+
+> **提供Java字符串-函数哈希表示例**
+
+当然可以。下面给你一个**可直接运行**的 Java Demo，核心思路就是：
+
+1. 用 `Map<String, Function>`（或 `Consumer`）保存“字符串 -> 函数”映射  
+2. 通过 `map.get(key)` 取出函数  
+3. 调用函数执行逻辑，替代一长串 `if-else`
+
+---
+
+### Demo：字符串指令分发（替代 if-else）
+
+```java
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Function;
+
+public class StringFunctionDispatchDemo {
+
+    // 你可以把它理解为请求对象（函数执行时需要的参数）
+    static class Request {
+        String user;
+        int amount;
+
+        Request(String user, int amount) {
+            this.user = user;
+            this.amount = amount;
+        }
+    }
+
+    // 字符串 -> 函数（输入Request，返回String结果）
+    private final Map<String, Function<Request, String>> handlerMap = new HashMap<>();
+
+    public StringFunctionDispatchDemo() {
+        // 注册各种“命令”
+        handlerMap.put("CREATE", req -> "创建用户成功: " + req.user);
+        handlerMap.put("PAY", req -> "扣款成功: " + req.user + "，金额=" + req.amount);
+        handlerMap.put("REFUND", req -> "退款成功: " + req.user + "，金额=" + req.amount);
+    }
+
+    // 分发执行：根据字符串找到函数并执行
+    public String dispatch(String action, Request request) {
+        Function<Request, String> handler = handlerMap.get(action);
+
+        if (handler == null) {
+            return "未知操作: " + action;
+        }
+        return handler.apply(request);
+    }
+
+    public static void main(String[] args) {
+        StringFunctionDispatchDemo demo = new StringFunctionDispatchDemo();
+
+        System.out.println(demo.dispatch("CREATE", new Request("Alice", 0)));
+        System.out.println(demo.dispatch("PAY", new Request("Bob", 100)));
+        System.out.println(demo.dispatch("REFUND", new Request("Cindy", 50)));
+        System.out.println(demo.dispatch("DELETE", new Request("David", 0))); // 未注册操作
+    }
+}
+```
+
+---
+
+### 你会得到的好处
+
+- **可扩展**：新增操作只要 `handlerMap.put("NEW_ACTION", func)`，不用改原有分支结构  
+- **更清晰**：避免几十行 `if-else if-else`  
+- **更易维护**：每个操作逻辑都独立
+
+---
+
+如果你愿意，我还可以给你下一版：
+
+- 用 `getOrDefault` 写法（更简洁）
+- 用 `Runnable` / `Consumer` / `BiFunction` 的对比版本
+- 结合 Spring（如 `@Component + Map` 自动注入）做企业项目常用实现。
+
+
+
+
 下面给一个**不使用反射**、**统一入参对象**的“表驱动”可运行示例：用 `Map<String, Function<Request, Response>>` 来替代 `if-else/switch`。  
 
 把代码保存为 `TableDrivenNoReflectionDemo.java`，直接运行。
