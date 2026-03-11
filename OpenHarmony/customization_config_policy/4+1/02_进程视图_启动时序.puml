@@ -1,0 +1,82 @@
+@startuml 02_进程视图_启动时序
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam sequenceMessageAlign center
+skinparam SequenceGroupBorderColor #888888
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #CCCCCC
+
+title 进程视图 — 系统启动时序
+
+actor       "目标系统\nInit 进程\n(不可修改)"  as INIT   #LightBlue
+participant "cust_init\n(开机写入程序)"        as CINIT  #FFE6CC
+participant "tmpfs\n/run/config_policy/"       as TMPFS  #D5E8D4
+participant "业务进程A\n(config_policy 调用方)" as APPA   #EAF4FB
+participant "业务进程B\n(config_policy 调用方)" as APPB   #EAF4FB
+
+== 阶段 1：内核启动 → Init 进程就绪 ==
+
+note over INIT
+  目标系统内核加载完成
+  Init 进程读取 init.cfg / init.rc
+  确定服务启动顺序
+end note
+
+== 阶段 2：cust_init 写入参数文件 ==
+
+INIT  ->  CINIT : exec("/usr/bin/cust_init")\n[在 init.cfg services 中注册，type=oneshot]
+activate CINIT #FFE6CC
+
+CINIT ->  TMPFS : mkdir -p /run/config_policy
+CINIT ->  TMPFS : 写入临时文件 params.tmp\n─────────────────────────────\nconst.cust.config_dir_layer=/system:/vendor:/oem\nconst.cust.follow_x_rules=\ntelephony.sim.opkey0=46060\ntelephony.sim.opkey1=46061
+
+note over CINIT, TMPFS
+  原子替换：先写 .tmp 再 rename
+  防止其他进程读到半写文件
+end note
+
+CINIT ->  TMPFS : rename(params.tmp, params)\n[原子替换]
+CINIT ->  TMPFS : chmod(params, 0444)\n[设为只读，防止运行期篡改]
+
+CINIT --> INIT  : exit(0)  ← 写入完成，主动退出
+deactivate CINIT
+
+note over TMPFS #D5E8D4
+  /run/config_policy/params 就绪
+  权限：-r--r--r--  (444)
+  owner: root
+end note
+
+== 阶段 3：业务进程启动（在 cust_init 之后） ==
+
+note over INIT
+  init.cfg 中通过顺序或
+  After= 依赖保证以下进程
+  在 cust_init 完成后启动
+end note
+
+INIT  ->  APPA : exec() 启动业务进程A
+activate APPA #EAF4FB
+note right of APPA
+  首次调用 GetCfgDirList() 时
+  才读取参数文件（懒加载）
+end note
+
+INIT  ->  APPB : exec() 启动业务进程B
+activate APPB #EAF4FB
+
+== 阶段 4：正常运行（参数文件始终可读） ==
+
+APPA  ->  TMPFS : fopen(params, "r") — 读取层路径
+TMPFS --> APPA  : "/system:/vendor:/oem"
+
+APPB  ->  TMPFS : fopen(params, "r") — 读取opkey
+TMPFS --> APPB  : "46060"
+
+note over APPA, APPB
+  多进程并发只读同一文件
+  无锁竞争，天然安全
+end note
+
+@enduml

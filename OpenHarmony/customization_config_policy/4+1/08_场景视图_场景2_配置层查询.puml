@@ -1,0 +1,91 @@
+@startuml 08_场景视图_场景2_配置层查询
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam sequenceMessageAlign center
+skinparam NoteBackgroundColor #FFFDE7
+
+title 场景2 — 配置层查询（UC3 + UC4 + UC5）\nGetCfgDirList / GetOneCfgFile / GetCfgFiles
+
+participant "业务应用程序"                         as APP    #EAF4FB
+participant "libconfig_policy_util.so"             as LIB    #D5E8D4
+participant "config_policy_param_adapter.h"        as ADAPT  #FFF2CC
+participant "tmpfs params"                         as TMPFS  #D5E8D4
+participant "文件系统"                              as FS     #F5F5F5
+
+== UC3：查询配置层目录列表 ==
+
+APP   ->  LIB   : GetCfgDirList()
+activate LIB
+
+  LIB  ->  ADAPT : SystemGetParameter("const.cust.config_dir_layer", NULL, &len)
+  ADAPT -> TMPFS : fopen + scan + fclose
+  TMPFS --> ADAPT : "/system:/vendor:/oem"
+  ADAPT --> LIB  : len=24
+
+  LIB  ->  ADAPT : SystemGetParameter("const.cust.config_dir_layer", buf, &len)
+  ADAPT -> TMPFS : fopen + scan + fclose
+  ADAPT --> LIB  : buf="/system:/vendor:/oem"
+
+  LIB  ->  LIB   : SplitStr() → paths[0..2]
+
+LIB   --> APP   : CfgDir* { paths=[ /system, /vendor, /oem ] }
+deactivate LIB
+
+APP   ->  LIB   : FreeCfgDirList(cfgDir)
+
+== UC4：查询最高优先级配置文件（单文件） ==
+
+APP   ->  LIB   : GetOneCfgFile("etc/telephony/config.json", buf, MAX_PATH_LEN)
+activate LIB
+
+  note over LIB
+    层遍历方向：高优先级 → 低
+    /oem → /vendor → /system
+  end note
+
+  LIB  ->  FS    : access("/oem/etc/telephony/config.json", F_OK)
+  FS   --> LIB   : -1 (ENOENT)
+
+  LIB  ->  FS    : access("/vendor/etc/telephony/config.json", F_OK)
+  FS   --> LIB   : 0 (命中!)
+
+  LIB  ->  LIB   : snprintf_s(buf, ..., "%s/%s", "/vendor", path)
+
+LIB   --> APP   : "/vendor/etc/telephony/config.json"
+deactivate LIB
+
+== UC5：查询所有层级的同名文件 ==
+
+APP   ->  LIB   : GetCfgFiles("etc/telephony/config.json")
+activate LIB
+
+  note over LIB
+    层遍历方向：低优先级 → 高
+    /system → /vendor → /oem
+    收集所有存在的路径
+  end note
+
+  LIB  ->  FS    : access("/system/etc/telephony/config.json", F_OK)
+  FS   --> LIB   : 0 (存在)
+
+  LIB  ->  FS    : access("/vendor/etc/telephony/config.json", F_OK)
+  FS   --> LIB   : 0 (存在)
+
+  LIB  ->  FS    : access("/oem/etc/telephony/config.json", F_OK)
+  FS   --> LIB   : -1 (不存在)
+
+  LIB  ->  LIB   : 为每个命中路径 strdup() 独立分配\npaths[0]="/system/...", paths[1]="/vendor/..."
+
+LIB   --> APP   : CfgFiles* { paths[2] }
+deactivate LIB
+
+note over APP
+  CfgFiles->paths[] 是各自独立 strdup()
+  可以安全地单独 free(paths[i])
+  或统一调用 FreeCfgFiles()
+end note
+
+APP   ->  LIB   : FreeCfgFiles(cfgFiles)
+
+@enduml

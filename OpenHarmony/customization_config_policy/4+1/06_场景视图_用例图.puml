@@ -1,0 +1,84 @@
+@startuml 06_场景视图_用例图
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam ActorBackgroundColor #EAF4FB
+skinparam UsecaseBackgroundColor #D5E8D4
+skinparam UsecaseBorderColor #5E9E5E
+
+title 场景视图（+1）— 用例图
+
+left to right direction
+
+' ════════════════════════════════════
+' 参与者
+' ════════════════════════════════════
+actor "业务应用程序\n(config_policy 调用方)" as APP
+actor "目标系统\nInit 进程"                  as INIT
+actor "cust_init\n(开机写入程序)"            as CINIT
+actor "系统运维人员\n/ 调试工程师"           as OPS
+
+' ════════════════════════════════════
+' 用例
+' ════════════════════════════════════
+rectangle "config_policy 移植版系统" as SYS {
+
+    package "系统初始化" as PKG_INIT {
+        usecase "UC1\n系统启动写入参数文件"     as UC1
+        usecase "UC2\n设置参数文件只读保护"     as UC2
+    }
+
+    package "配置路径查询" as PKG_QUERY {
+        usecase "UC3\n查询配置层目录列表"       as UC3
+        usecase "UC4\n查询单个配置文件路径"     as UC4
+        usecase "UC5\n查询所有层级匹配文件"     as UC5
+        usecase "UC6\nFollow-X 运营商路径查询" as UC6
+    }
+
+    package "可观测性" as PKG_OBS {
+        usecase "UC7\n诊断当前生效层路径"       as UC7
+        usecase "UC8\n验证参数文件内容"         as UC8
+        usecase "UC9\n查询错误事件日志"         as UC9
+    }
+}
+
+' ════════════════════════════════════
+' 关系
+' ════════════════════════════════════
+INIT  -->  UC1
+CINIT -->  UC1
+CINIT -->  UC2
+
+APP   -->  UC3
+APP   -->  UC4
+APP   -->  UC5
+APP   -->  UC6
+
+OPS   -->  UC7
+OPS   -->  UC8
+OPS   -->  UC9
+
+' 包含关系
+UC3   ..>  UC1 : <<include>>\n参数文件就绪前提
+UC4   ..>  UC3 : <<include>>\n依赖层路径列表
+UC5   ..>  UC3 : <<include>>\n依赖层路径列表
+UC6   ..>  UC4 : <<extend>>\n扩展：插入运营商子目录
+
+UC7   ..>  UC3 : <<include>>\n调用 GetCfgDirList
+UC8   ..>  UC1 : <<include>>\n验证写入结果
+
+note bottom of UC6
+  Follow-X 模式：
+  在层路径中插入运营商子目录
+  如 /vendor/etc/carrier/46060/etc/...
+  支持 SIM_DEFAULT / SIM_1 / SIM_2 /
+  USER_DEFINED 四种模式
+end note
+
+note right of UC9
+  由 hisysevent_adapter.cpp
+  (移植版) 写入目标系统日志
+  仅在核心函数返回 NULL 时触发
+end note
+
+@enduml

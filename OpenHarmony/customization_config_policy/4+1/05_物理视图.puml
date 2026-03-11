@@ -1,0 +1,115 @@
+@startuml 05_物理视图
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam ArrowColor #444444
+skinparam NodeBorderColor #888888
+skinparam ArtifactBackgroundColor #FFFFF0
+skinparam ArtifactBorderColor #AAAAAA
+skinparam ComponentBackgroundColor #EAF4FB
+skinparam DatabaseBackgroundColor #D5E8D4
+skinparam FolderBackgroundColor #FFF2CC
+
+title 物理视图 — 部署结构与文件系统映射
+
+node "目标硬件设备  (Harmony 内核)" as DEVICE {
+
+    ' ────────────────────────────────────────────
+    ' 只读根文件系统
+    ' ────────────────────────────────────────────
+    node "只读根文件系统 rootfs  (掉电不丢失)" as ROOTFS #F0FFF0 {
+
+        package "/usr/bin/" as USRBIN {
+            artifact "cust_init\n[可执行文件]" as CINIT_BIN
+            artifact "dump_config_layers\n[诊断工具，可选]" as DUMP_BIN
+        }
+
+        package "/usr/lib/  或  /system/lib/" as USRLIB {
+            artifact "libconfig_policy_util.so\n[共享库]" as SO
+            note right of SO
+                导出符号:
+                GetCfgDirList()
+                GetCfgFiles() / GetCfgFilesEx()
+                GetOneCfgFile() / GetOneCfgFileEx()
+                FreeCfgDirList() / FreeCfgFiles()
+            end note
+        }
+
+        package "/etc/  或  /vendor/etc/  init 配置" as INIT_ETC {
+            artifact "init.cfg / init.rc\n[init 服务注册文件]" as INIT_CFG
+            note right of INIT_CFG
+                注册 cust_init 为 oneshot 服务
+                保证在业务进程之前启动
+                ─────────────────────────────
+                示例 (init.cfg):
+                { "name": "cust_init",
+                  "path": ["/usr/bin/cust_init"],
+                  "once": 1 }
+            end note
+        }
+
+        package "配置层目录  (只读，优先级从低到高)" as CFG_LAYERS {
+            folder "/system/etc/\n(层1  最低优先级)" as SYS_ETC
+            folder "/vendor/etc/\n(层2)" as VENDOR_ETC
+            folder "/oem/etc/\n(层3  最高优先级)" as OEM_ETC
+        }
+    }
+
+    ' ────────────────────────────────────────────
+    ' tmpfs（内存文件系统，重启后消失）
+    ' ────────────────────────────────────────────
+    node "tmpfs  /run/  (内存文件系统，重启后消失)" as TMPFS_FS #FFF8DC {
+
+        package "/run/config_policy/" as PARAM_DIR {
+            database "params\n权限: -r--r--r-- (444)\nowner: root" as PARAMS
+            note right of PARAMS
+                内容 (key=value 格式):
+                ──────────────────────────────
+                const.cust.config_dir_layer=
+                  /system:/vendor:/oem
+                const.cust.follow_x_rules=
+                telephony.sim.opkey0=46060
+                telephony.sim.opkey1=46061
+                ──────────────────────────────
+                每次开机由 cust_init 重新写入
+                chmod 444 后任何进程均只读
+            end note
+        }
+    }
+
+    ' ────────────────────────────────────────────
+    ' 运行时进程
+    ' ────────────────────────────────────────────
+    node "运行时进程" as PROCS {
+
+        component "Init 进程\n(目标系统原生，不可修改)\nPID 1" as INIT_PROC
+
+        component "cust_init 进程\n(oneshot，运行后退出)\n临时 PID" as CINIT_PROC
+
+        component "业务进程 A\n(链接 libconfig_policy_util.so)" as APPA
+
+        component "业务进程 B\n(链接 libconfig_policy_util.so)" as APPB
+    }
+}
+
+' ════════════════════════════════════
+' 部署关系
+' ════════════════════════════════════
+INIT_PROC  ..>  CINIT_BIN     : exec() 启动
+INIT_PROC  ..>  APPA          : exec() 启动 (cust_init 完成后)
+INIT_PROC  ..>  APPB          : exec() 启动
+
+CINIT_PROC ..>  CINIT_BIN     : 加载自
+CINIT_PROC ..>  PARAMS        : 写入参数\nchmod 444
+
+APPA       ..>  SO            : 动态链接
+APPB       ..>  SO            : 动态链接
+
+SO         ..>  PARAMS        : fopen() 读取参数\n(多进程并发只读)
+SO         ..>  SYS_ETC       : access(F_OK)
+SO         ..>  VENDOR_ETC    : access(F_OK)
+SO         ..>  OEM_ETC       : access(F_OK)
+
+INIT_CFG   ..>  CINIT_BIN     : 引用路径
+
+@enduml

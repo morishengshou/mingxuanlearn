@@ -1,0 +1,86 @@
+@startuml 03_进程视图_运行时序
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam sequenceMessageAlign center
+skinparam NoteBackgroundColor #FFFDE7
+skinparam NoteBorderColor #CCCCCC
+
+title 进程视图 — 运行时配置查询时序（以 GetCfgDirList 为例）
+
+participant "业务应用程序"                            as APP    #EAF4FB
+participant "libconfig_policy_util.so\nconfig_policy_utils.c" as LIB  #D5E8D4
+participant "config_policy_param_adapter.h\nSystemGetParameter()" as ADAPTER #FFF2CC
+participant "tmpfs\n/run/config_policy/params"        as TMPFS  #D5E8D4
+participant "目标系统文件系统\n/system /vendor /oem"   as FS     #F5F5F5
+
+== 查询配置层目录列表 ==
+
+APP    ->  LIB    : GetCfgDirList()
+activate LIB #D5E8D4
+
+  LIB  ->  LIB    : GetCfgDirRealPolicyValue()
+
+  group 两步调用：第 1 步 — 获取所需缓冲区长度
+    LIB    ->  ADAPTER : SystemGetParameter(\n  "const.cust.config_dir_layer", NULL, &len)
+    activate ADAPTER #FFF2CC
+      ADAPTER ->  TMPFS  : fopen(params, "r")
+      ADAPTER ->  TMPFS  : fgets() 逐行扫描，匹配 key=
+      TMPFS   --> ADAPTER : "const.cust.config_dir_layer=/system:/vendor:/oem"
+      ADAPTER ->  TMPFS  : fclose()
+      ADAPTER --> LIB    : *len = 25, return 0
+    deactivate ADAPTER
+  end
+
+  group 两步调用：第 2 步 — 读取参数值
+    LIB    ->  LIB    : calloc(len, 1)  ← 分配缓冲区
+    LIB    ->  ADAPTER : SystemGetParameter(\n  "const.cust.config_dir_layer", buf, &len)
+    activate ADAPTER #FFF2CC
+      ADAPTER ->  TMPFS  : fopen + scan + fclose
+      ADAPTER --> LIB    : buf = "/system:/vendor:/oem", return 0
+    deactivate ADAPTER
+  end
+
+  LIB    ->  LIB    : SplitStr("/system:/vendor:/oem", ":")\n→ paths[0]="/system"\n→ paths[1]="/vendor"\n→ paths[2]="/oem"
+
+  note over LIB
+    CfgDir->paths[] 指向 realPolicyValue 内部
+    禁止单独 free(paths[i])！
+    使用 FreeCfgDirList() 统一释放
+  end note
+
+LIB    --> APP    : CfgDir* { paths[3], realPolicyValue }
+deactivate LIB
+
+== 查询最高优先级配置文件 ==
+
+APP    ->  LIB    : GetOneCfgFile("etc/cfg.xml", buf, MAX_PATH_LEN)
+activate LIB #D5E8D4
+
+  note over LIB
+    优先级：高 → 低（反向遍历）
+    先检查 /oem，再 /vendor，最后 /system
+  end note
+
+  loop 从最高优先级层逐层向下查找
+    LIB  ->  FS    : access("/oem/etc/cfg.xml", F_OK)
+    FS   --> LIB   : ENOENT (不存在)
+    LIB  ->  FS    : access("/vendor/etc/cfg.xml", F_OK)
+    FS   --> LIB   : 0 (存在!)
+  end
+
+  LIB  ->  LIB    : snprintf(buf, MAX_PATH_LEN,\n  "%s/%s", "/vendor", "etc/cfg.xml")
+
+LIB    --> APP    : "/vendor/etc/cfg.xml"
+deactivate LIB
+
+== 释放资源 ==
+
+APP    ->  LIB    : FreeCfgDirList(cfgDir)
+note right
+  free(realPolicyValue)
+  paths[] 指针随之失效
+  无需单独 free
+end note
+
+@enduml

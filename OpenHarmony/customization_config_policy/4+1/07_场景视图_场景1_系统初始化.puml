@@ -1,0 +1,71 @@
+@startuml 07_场景视图_场景1_系统初始化
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam sequenceMessageAlign center
+skinparam NoteBackgroundColor #FFFDE7
+
+title 场景1 — 系统初始化（UC1 + UC2）\ncust_init 开机写入参数文件
+
+actor       "Init 进程"                   as INIT   #LightBlue
+participant "cust_init"                   as CINIT  #FFE6CC
+participant "/run/ (tmpfs)"               as TMPFS  #D5E8D4
+participant "init.cfg / init.rc"          as CFG    #F5F5F5
+
+== 前置条件 ==
+note over CFG
+  init.cfg 中已注册 cust_init 服务:
+  { "name": "cust_init",
+    "path": ["/usr/bin/cust_init"],
+    "once": 1 }
+  保证在业务进程之前启动
+end note
+
+== 主流程 ==
+
+INIT  ->  CFG    : 读取服务启动顺序
+INIT  ->  CINIT  : exec("/usr/bin/cust_init")
+activate CINIT #FFE6CC
+
+CINIT ->  TMPFS  : access("/run", F_OK)
+TMPFS --> CINIT  : 存在 (tmpfs 已挂载)
+
+CINIT ->  TMPFS  : mkdir("/run/config_policy", 0755)
+
+CINIT ->  CINIT  : 构建参数内容字符串\nconst.cust.config_dir_layer=/system:/vendor:/oem\n...
+
+CINIT ->  TMPFS  : open("params.tmp", O_WRONLY|O_CREAT, 0644)
+CINIT ->  TMPFS  : write(fd, content, len)\n(写入全部 key=value 内容)
+CINIT ->  TMPFS  : fsync(fd)  ← 确保写入 tmpfs 缓存
+CINIT ->  TMPFS  : close(fd)
+
+CINIT ->  TMPFS  : rename("params.tmp", "params")\n[原子替换，防止半读]
+
+CINIT ->  TMPFS  : chmod("params", 0444)\n[只读保护]
+
+CINIT --> INIT   : exit(0)
+deactivate CINIT
+
+== 验证 ==
+note over TMPFS #D5E8D4
+  /run/config_policy/params
+  -r--r--r-- root root
+  内容就绪，多进程可并发只读
+end note
+
+== 异常流程 ==
+note over CINIT, TMPFS #FFE8E8
+  异常1：tmpfs 未挂载
+    → access("/run") 返回 ENOENT
+    → exit(1)，Init 重试或告警
+
+  异常2：磁盘(内存)写入失败
+    → write() 返回错误
+    → 清理临时文件，exit(1)
+
+  注：若 cust_init 未执行，
+  libconfig_policy_util.so 回落
+  到编译期 DEFAULT_LAYER
+end note
+
+@enduml

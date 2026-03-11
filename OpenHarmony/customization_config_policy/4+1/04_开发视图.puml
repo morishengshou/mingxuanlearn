@@ -1,0 +1,201 @@
+@startuml 04_开发视图
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam ArrowColor #444444
+skinparam PackageBorderColor #888888
+skinparam ClassBackgroundColor #FFFFFF
+skinparam ClassBorderColor #AAAAAA
+
+title 开发视图 — 包结构、文件职责与编译依赖
+
+legend top right
+  |= 标记 |= 含义 |
+  | <back:#D5E8D4>  不变  </back> | 来自原仓库，零改动 |
+  | <back:#FFF2CC>  修改  </back> | 来自原仓库，少量修改 |
+  | <back:#FFB3B3>  替换  </back> | 来自原仓库，实现已替换 |
+  | <back:#87CEEB>  新增  </back> | 移植新增文件 |
+endlegend
+
+' ═══════════════════════════════════════════════════
+' 顶层构建
+' ═══════════════════════════════════════════════════
+package "my_project/  (项目根目录)" as ROOT {
+
+    class "CMakeLists.txt\n(顶层构建脚本)" as ROOT_CMAKE #87CEEB {
+        构建目标
+        ==
+        libconfig_policy_util.so
+        cust_init  (可执行文件)
+        dump_config_layers  (诊断工具，可选)
+        ..
+        编译选项
+        ==
+        -std=c11
+        -D_POSIX_C_SOURCE=200809L
+        -DCONFIG_POLICY_PARAM_FILE=...
+    }
+
+    ' ─────────────────────────────────────────────
+    ' 平台适配层
+    ' ─────────────────────────────────────────────
+    package "port/  (平台适配层)" as PORT #87CEEB {
+
+        class "config_policy_param_adapter.h" as PARAM_H #87CEEB {
+            [新增] 替代 init_param.h
+            ==
+            +SystemGetParameter(name, buf, len)
+            +SystemSetParameter(name, value)
+            --
+            实现：fopen 读取 tmpfs 参数文件
+            支持两步调用模式
+            PARAM_CONST_VALUE_LEN_MAX = 512
+        }
+
+        class "compat_securec.h" as SEC_H #87CEEB {
+            [新增] 替代 securec.h
+            ==
+            +snprintf_s()  → snprintf()
+            +strtok_s()    → strtok_r()  ★3参数
+            +memcpy_s()    → memcpy()
+            +memmove_s()   → memmove()
+            +memset_s()    → memset()
+            +strcat_s()    → strncat()
+            +EOK           → 0
+        }
+
+        class "config_policy_log.h" as LOG_H #87CEEB {
+            [新增] 替代 HiLog/hilog
+            ==
+            +CONFIG_POLICY_LOG_ERROR(fmt,...)
+            +CONFIG_POLICY_LOG_INFO(fmt,...)
+            --
+            默认: fprintf(stderr)
+            可宏替换为目标系统日志接口
+        }
+    }
+
+    ' ─────────────────────────────────────────────
+    ' 移植子模块
+    ' ─────────────────────────────────────────────
+    package "customization_config_policy/  (移植子模块)" as CCP {
+
+        package "interfaces/inner_api/include/" as INC_DIR {
+            class "config_policy_utils.h" as API_H #D5E8D4 {
+                [不变] 公共 C API 头文件
+                ==
+                struct CfgDir { paths[32]; realPolicyValue; }
+                struct CfgFiles { paths[32]; }
+                FOLLOWX_MODE_* 常量
+                MAX_CFG_POLICY_DIRS_CNT = 32
+                MAX_PATH_LEN = 256
+                --
+                GetCfgDirList() / FreeCfgDirList()
+                GetCfgFiles() / GetCfgFilesEx()
+                GetOneCfgFile() / GetOneCfgFileEx()
+                FreeCfgFiles()
+            }
+
+            class "config_policy_impl.h" as IMPL_H #D5E8D4 {
+                [不变] 内部常量定义
+                ==
+                CUST_KEY_POLICY_LAYER
+                CUST_FOLLOW_X_RULES
+                DEFAULT_LAYER
+                ROOT_PREFIX
+            }
+        }
+
+        package "frameworks/config_policy/src/" as SRC_DIR {
+            class "config_policy_utils.c" as UTILS_C #FFF2CC {
+                [修改] 仅 2 处 #include 变更
+                ==
+                第19行: <securec.h>
+                      → "compat_securec.h"
+                第25行: "init_param.h"
+                      → "config_policy_param_adapter.h"
+                --
+                业务逻辑: 零改动
+                平台分支: 使用 #else 标准分支
+            }
+        }
+
+        package "frameworks/dfx/hisysevent_adapter/" as DFX_DIR {
+            class "hisysevent_adapter.h" as DFX_H #D5E8D4 {
+                [不变] DFX 接口声明
+                ==
+                enum ReportType {
+                  CONFIG_POLICY_FAILED = 0
+                  CONFIG_POLICY_EVENT
+                }
+                --
+                +ReportConfigPolicyEvent(type, api, msg)
+            }
+
+            class "hisysevent_adapter.cpp" as DFX_CPP #FFB3B3 {
+                [替换] 移除 OH 专有依赖
+                ==
+                原实现依赖:
+                  hisysevent.h (HiSysEventWrite)
+                  hilog/log.h (HILOG_ERROR)
+                --
+                新实现依赖:
+                  config_policy_log.h (宏桥接)
+                  仅在核心函数返回NULL时触发
+            }
+        }
+    }
+
+    ' ─────────────────────────────────────────────
+    ' 开机写入程序
+    ' ─────────────────────────────────────────────
+    package "cust_init/  (开机参数写入程序)" as CINIT_DIR #87CEEB {
+
+        class "main.c" as CINIT_C #87CEEB {
+            [新增] 开机一次性写入
+            ==
+            +main()
+            +WriteParamFile()
+            --
+            流程:
+              mkdir -p /run/config_policy
+              写入 params.tmp
+              rename → params  (原子)
+              chmod 444
+              exit(0)
+            --
+            依赖: libc only (无其他依赖)
+        }
+
+        class "CMakeLists.txt" as CINIT_CMAKE #87CEEB {
+            target: cust_init (executable)
+            link: libc only
+        }
+    }
+}
+
+' ═══════════════════════════════════════════════════
+' 编译依赖关系
+' ═══════════════════════════════════════════════════
+UTILS_C   ..>  PARAM_H   : #include\n(替代 init_param.h)
+UTILS_C   ..>  SEC_H     : #include\n(替代 securec.h)
+UTILS_C   ..>  API_H     : #include
+UTILS_C   ..>  IMPL_H    : #include
+DFX_CPP   ..>  LOG_H     : #include\n(替代 HiLog)
+DFX_CPP   ..>  DFX_H     : #include
+
+ROOT_CMAKE ..> UTILS_C   : 编译
+ROOT_CMAKE ..> DFX_CPP   : 编译
+ROOT_CMAKE ..> CINIT_C   : 编译
+
+note bottom of ROOT_CMAKE
+  编译产物：
+  ─────────────────────────────────────
+  libconfig_policy_util.so  ← UTILS_C + DFX_CPP
+  cust_init                 ← CINIT_C
+  ─────────────────────────────────────
+  移除原始依赖：
+  hisysevent / hilog / init(libbegetutil)
+end note
+
+@enduml

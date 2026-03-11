@@ -1,0 +1,145 @@
+@startuml 01_逻辑视图
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontName "Microsoft YaHei"
+skinparam componentStyle rectangle
+skinparam ArrowColor #444444
+skinparam PackageBorderColor #888888
+
+title 逻辑视图 — 组件职责与接口关系
+
+' ═══════════════════════════════════════════════════
+' 应用层
+' ═══════════════════════════════════════════════════
+package "应用层" as APP_LAYER #EAF4FB {
+    component "业务应用程序\n(config_policy 调用方)" as APP
+}
+
+' ═══════════════════════════════════════════════════
+' 配置策略模块
+' ═══════════════════════════════════════════════════
+package "配置策略模块  customization_config_policy/" as CCP #D5E8D4 {
+
+    interface "C 公共 API" as PUBLIC_API
+    note right of PUBLIC_API
+        config_policy_utils.h
+        ────────────────────────
+        GetCfgDirList()
+        GetCfgFiles() / GetCfgFilesEx()
+        GetOneCfgFile() / GetOneCfgFileEx()
+        FreeCfgDirList() / FreeCfgFiles()
+    end note
+
+    component "配置策略核心\nconfig_policy_utils.c" as CORE
+    note bottom of CORE
+        GetCfgDirRealPolicyValue()  读参数 → 解析层路径
+        GetFollowXRule()            读参数 → 获取Follow-X规则
+        GetOpkeyPath()              读参数 → 获取运营商opkey
+        SplitStr() / ExpandStr()    字符串处理
+        EnsureHolderSpace()         动态缓冲管理
+    end note
+
+    component "DFX诊断适配\nhisysevent_adapter.cpp" as DFX
+    note bottom of DFX
+        ReportConfigPolicyEvent()
+        ──────────────────────────
+        仅在核心函数返回 NULL
+        时触发（错误路径）
+    end note
+}
+
+' ═══════════════════════════════════════════════════
+' 平台适配层
+' ═══════════════════════════════════════════════════
+package "平台适配层  port/" as PORT #FFF2CC {
+
+    component "参数系统适配\nconfig_policy_param_adapter.h" as PARAM
+    note bottom of PARAM
+        SystemGetParameter()
+        ──────────────────────
+        替代 init_param.h
+        读取 tmpfs 参数文件
+        支持两步调用模式
+        (NULL→len, buf→value)
+    end note
+
+    component "安全函数兼容层\ncompat_securec.h" as SECUREC
+    note bottom of SECUREC
+        snprintf_s  → snprintf
+        strtok_s    → strtok_r  ★注意参数顺序
+        memcpy_s    → memcpy
+        memmove_s   → memmove
+        memset_s    → memset
+        strcat_s    → strncat
+        EOK         → 0
+    end note
+
+    component "日志适配宏\nconfig_policy_log.h" as LOG
+    note bottom of LOG
+        CONFIG_POLICY_LOG_ERROR(fmt,...)
+        CONFIG_POLICY_LOG_INFO(fmt,...)
+        ──────────────────────────────
+        替代 HiLog/hilog
+        默认实现: fprintf(stderr)
+        可替换为目标系统日志接口
+    end note
+}
+
+' ═══════════════════════════════════════════════════
+' 系统初始化模块
+' ═══════════════════════════════════════════════════
+package "系统初始化模块  cust_init/" as CINIT_PKG #FFE6CC {
+    component "开机参数写入程序\nmain.c" as CINIT
+    note right of CINIT
+        职责：
+        1. 创建 /run/config_policy/
+        2. 原子写入 params.tmp
+        3. mv → params (原子替换)
+        4. chmod 444（只读保护）
+        5. exit(0)
+        ──────────────────
+        仅依赖 libc，无其他依赖
+        运行一次即退出 (oneshot)
+    end note
+}
+
+' ═══════════════════════════════════════════════════
+' 目标系统平台
+' ═══════════════════════════════════════════════════
+package "目标系统平台" as PLATFORM #F5F5F5 {
+
+    database "tmpfs 参数文件\n/run/config_policy/params\nchmod 444 (只读)" as TMPFS_DB
+    note right of TMPFS_DB
+        内容格式 (key=value):
+        ──────────────────────────────
+        const.cust.config_dir_layer=...
+        const.cust.follow_x_rules=...
+        telephony.sim.opkey0=46060
+        telephony.sim.opkey1=46061
+    end note
+
+    folder "多层配置文件系统" as CFG_FS
+    note right of CFG_FS
+        /system/etc/   (层1 最低优先级)
+        /vendor/etc/   (层2)
+        /oem/etc/      (层3 最高优先级)
+        路径由参数文件配置
+    end note
+}
+
+' ═══════════════════════════════════════════════════
+' 关系连线
+' ═══════════════════════════════════════════════════
+APP         -->  PUBLIC_API   : 调用
+PUBLIC_API  --   CORE
+
+CORE        -->  PARAM        : include\n(替代 init_param.h)
+CORE        -->  SECUREC      : include\n(替代 securec.h)
+CORE        ..>  DFX          : 核心函数返回NULL时\n上报错误事件
+DFX         -->  LOG          : include\n(替代 HiLog)
+
+PARAM       -->  TMPFS_DB     : fopen() 读取参数值
+CINIT       -->  TMPFS_DB     : 开机写入\nchmod 444
+CORE        ..>  CFG_FS       : access(F_OK)\n验证配置文件存在
+
+@enduml
