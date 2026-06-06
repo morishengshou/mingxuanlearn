@@ -1,0 +1,747 @@
+*Thinking...*
+
+> **Searching for Odoo18 solutions**
+> 
+> It looks like I need to provide an answer in Chinese, likely related to Odoo18. The user has a technical question about date and time fields, and I should search for the latest information. I'll find official Odoo documentation on fields.Datetime for Odoo 18. Citations are necessary, and I must use primary sources. There's also some confusion about the current date between the system and developer, but my main focus is on getting the accurate documentation. I'll dive into that now!
+> 
+> **Integrating time field functionality**
+> 
+> I need to include coding that ensures all time fields are automatically converted to UTC during writing. I want to clarify the field types, especially understanding “时间类型” — it might refer to Datetime, not Date. Odoo's Date fields lack timezone, so they shouldn’t convert to UTC; I think based on that, fields may only have Date and Datetime. I will also check for Date fields and consider integration with pytz for handling ISO8601 strings with timezone.
+> 
+> **Converting datetime fields**
+> 
+> I’m focusing on how to manage datetime fields. First, if the value is False or None, I’ll keep it as is. For datetime objects, if they’re naive, I want to assign the source timezone and convert them to UTC while removing tzinfo. Odoo expects a UTC string format, so I might need to return it using fields.Datetime.to_string for safety. With date objects, I may convert them to midnight in the source timezone before converting to UTC. For strings, I should ensure that they comply with Odoo’s expected format or use ISO parsing with dateutil.
+> 
+> **Using dateutil for parsing**
+> 
+> I think it’s best to use dateutil.parser.isoparse for handling date strings. If the string has a timezone suffix, I’ll convert it while respecting the timezone. If there’s no timezone, I need to localize it using the context’s external source timezone, especially if it's from an external API. For purely date strings, I should treat them as midnight in the local timezone, with a warning for clarity. 
+> 
+> When dealing with daylight saving time, I’ll localize with is_dst=None to be cautious, and log or raise errors if needed. Since Odoo primarily uses pytz, I think I'll keep using it to handle timezone-aware and naive datetime conversions.
+> 
+> **Implementing safety for datetime handling**
+> 
+> I need to establish a safety mechanism that either enforces strict context or allows for fails. Since we're auto-converting to UTC, if there's an invalid time, I think it makes sense to log the error and skip just that field in the external JSON, while allowing the rest to write normally. Users might want an option for either strict or non-strict modes. If a datetime conversion fails, I would log it as ignored and still write the other fields. 
+> 
+> For data integrity, strict mode would raise an error. I’m considering a reusable mixin class, `ExternalSafeWriteMixin`, that models can inherit from. If an existing class has a `_name`, I can use `_inherit` for the mixin, while new models would define their own `_name` along with inheriting from the mixin.
+> 
+> **Modifying datetime handling in code**
+> 
+> I need to be cautious with `@api.model_create_multi`, or consider adding methods directly to the model instead. I think it's important to show how to modify the previous `_sanitize_external_json_vals` function to include normalization. 
+> 
+> I’m importing several libraries, including `logging`, `json`, `datetime`, `pytz`, and `dateutil`. Then, I’ll check the field type by identifying it in `_fields`. If it’s a Datetime field, I’ll convert it to a UTC string, and for Date fields, I’ll handle that accordingly. I want to make sure to verify the field type with `field.type` instead of relying on `isinstance`, as it would be more robust. I'll avoid double conversion by checking Datetime before Date.
+> 
+> **Handling time zone settings**
+> 
+> I’m defining a function, `_get_external_source_tz`, to handle external time zone settings. I’ll check if there's an `external_source_tz` in the context; if not, I will fall back to the user's timezone or default to UTC. 
+> 
+> It’s important to note that if the external API doesn't provide a timezone, I should use UTC to avoid issues with double shifts. For external data, if the value has an explicit timezone, I’ll use that. If it’s naive, I’ll rely on `external_source_tz` if available, but I won’t automatically use the user's timezone to prevent silent errors. Setting a default context for `external_source_tz` as UTC is a good practice.
+> 
+> **Parsing external datetime values**
+> 
+> I’m implementing a method called `_parse_external_datetime` to handle various datetime inputs. If the input is False, None, or an empty string, I’ll simply return False. If it’s a datetime or date object, I can convert it accordingly; for dates, I’ll combine it with time.min to create a datetime object.
+> 
+> For string inputs, I’ll strip whitespace and check for validity. I plan to use `dateutil_parser.isoparse` to handle ISO formats, including possible offsets. If that fails, I’ll fall back on Odoo's `fields.Datetime.to_datetime`. I need to clarify if dateutil always returns naive datetimes, and I suspect it does. If the input is date-only, `isoparse` will give it at midnight, and I think this approach will also support ISO formats with fractional seconds.
+> 
+> **Converting external datetime to UTC string**
+> 
+> I’m implementing the function `_external_datetime_to_utc_string`, which starts by checking if the value is False, None, or an empty string; if so, it returns False. For a datetime object, if it lacks timezone information, I need to get the appropriate timezone. I’ll use `localize` for aware datetimes and handle exceptions related to non-existent or ambiguous times. 
+> 
+> In cases of ambiguity, I think it would be safer not to raise errors by default, and instead, I can log those invalid conversions. If the context specifies `external_datetime_strict`, then I should raise an error. I could also consider storing invalid entries in an existing log model or adding a new field for invalid payloads.
+> 
+> **Enhancing field handling**
+> 
+> I’m considering adding `invalid_keys` and `invalid_payload` fields to log errors more effectively. The user wants to implement a feature that processes all datetime type fields during every write, not just for external JSON. I need to be cautious, though, since Odoo already stores datetime fields in UTC. If I apply conversions again without context awareness, it could lead to double shifts, which is risky. 
+> 
+> I should recommend using a context option like `auto_utc_datetime=True` or use a dedicated method like `write_external_json`. To avoid issues, it’s essential to emphasize that this should only be done with `safe_external_json=True` to maintain data integrity. Ultimately, Odoo’s documentation highlights that datetime fields are already managed appropriately, so I shouldn't blindly convert values without context.
+> 
+> **Updating the sanitization process**
+> 
+> I need to enhance the existing `_sanitize_external_json_vals` function by adding new functionality. For example, when creating or writing to `x.external.data`, I’ll use specific context options like `safe_external_json=True`, `external_datetime_to_utc=True`, and set the timezone to `Asia/Shanghai`. This way, any API responses with time zones in ISO format will be properly adjusted to UTC.
+> 
+> I plan to handle date fields by simply using `fields.Date.to_string(fields.Date.to_date(value))`, as these do not require UTC conversion. I should also refer to Odoo's documentation for essential facts about UTC handling and formatting, especially since we’re leveraging the web for information but keeping Python library citations minimal unless directly relevant.
+> 
+> **Improving field type detection and logging**
+> 
+> I think it's essential to enhance field type detection by checking the field type directly. For instance, I’ll use `field_obj = self._fields.get(key)` to determine if the field type is 'datetime'.
+> 
+> Odoo documentation states that date strings should be in the format `YYYY-MM-DD`, and datetime strings should follow `YYYY-MM-DD HH:MM:SS`, with `False` or `None` being valid options. I should also consider the potential issue with Method Resolution Order (MRO) if I use an abstract mixin that overrides create/write.
+> 
+> It's practical to suggest modifications like “在你上一版代码中增加这些方法，并把 `_sanitize_external_json_vals` 改成这个版本.” I also want to include invalid logging by augmenting fields as follows:
+> 
+> ```
+> invalid_keys = fields.Text()
+> invalid_payload = fields.Text()
+> ```
+> 
+> I need to ensure robust logging by designing the methods correctly and perhaps revisiting `safe_json_dumps` from previous code. I'll start refining the code further!
+> 
+> **Modeling log fields and parsing datetime**
+> 
+> I am enhancing the `ExternalPayloadIssueLog` model by adding fields for logging invalid keys and payloads. If the user hasn't created a log model, I might suggest, "如果上一条还没加，直接加这些字段到日志模型," and include a relevant code snippet.
+> 
+> Next, I'm focusing on the `_get_external_source_tz` method, which retrieves the timezone, defaulting to UTC. It’s crucial to handle `pytz.UnknownTimeZoneError` properly.
+> 
+> In `_parse_external_datetime`, I need to ensure that checking for `value in (False, None, "")` works, as the input might also include a timestamp of `0`. This could cause unintended behavior, so I'll consider additional checks for that scenario. I must stay cautious about how the datetime logic processes these values!
+> 
+> **Considering Unix timestamp support**
+> 
+> I’m thinking about whether I can support Unix timestamps, but there’s a potential issue with treating `0` as false. To avoid this confusion, I’ll adjust my checks. Instead of using `value in (False, None)`, I could say: if the value is `False` or `None`, return `False`. Then I’ll add a check for strings: if `isinstance(value, str)` and not `value.strip()`, return `False`. Doing this will help me handle the `0` timestamp situation more gracefully and raise an "unsupported" error if needed!
+> 
+> **Refining datetime localization and normalization**
+> 
+> I’m looking into my `_localize_naive_datetime` function, where I retrieve the timezone using `_get_external_source_tz()`. I should manage ambiguity with a strategy that defaults to 'raise', but allows options for 'standard' or 'dst'.
+> 
+> Next, in `_external_datetime_to_utc_orm_string`, I need to ensure `dt` is timezone aware or localize it if not. The `_external_date_to_orm_string` checks if the value is valid, and will try to convert it to a date if necessary. I wonder if the context for `external_datetime_to_utc` should default to true in safe external scenarios—maybe that will make things smoother!
+> 
+> **Implementing automatic datetime conversion**
+> 
+> I’m thinking about how to automatically convert values when `safe_external_json` is set. If the context doesn't specify `external_datetime_to_utc`, I'll return the value as is. However, for internal cases, `_sanitize` is only triggered in safe context, which simplifies things.
+> 
+> In `_sanitize_external_json_vals`, I handle potential invalid values by trying to normalize each one. If a non-datetime field has an issue, I should only log conversion errors. I also want to avoid storing exception objects with lazy translations in JSON. To keep everything tidy, I’ll update the `write` method to log any issues effectively!
+> 
+> **Integrating timezone handling in write methods**
+> 
+> I need to adjust how I handle time fields in the `write` method for better timezone integration. If the context specifies `auto_utc_datetime` and isn’t in safe JSON mode, I’ll normalize the datetime values using my own function before proceeding.
+> 
+> I’ll provide a simpler snippet to intercept all writes and ensure datetime fields convert to UTC. It's essential to remember that Odoo stores datetimes in UTC and has the database timestamps without a timezone. If an external API provides timezone data, I must convert it to UTC before writing, while date fields won’t require conversion. Also, if the value is already in UTC format, I shouldn't alter it.
+> 
+> **Crafting a comprehensive implementation guide**
+> 
+> I need to reference valid values when assigning Date/Datetime in Odoo: Python date/datetime, proper string formats, and acceptable values like False/None. It's also important to state that Datetime fields are stored in UTC. 
+> 
+> I'll include citations to Odoo 18 about Date/Datetime assignments, along with information about conversion direction in the context. 
+> 
+> Here's how I can structure my final output:
+> 
+> First, I suggest enabling external API synchronization for write operations but not as a blanket change. Odoo stores Datetime in UTC, and clients are responsible for display conversions. I've got specific implementation details to cover.
+> 
+> Starting with imports, followed by extending the log model, adding methods to the model, and modifying sanitize/write/create functions. I’ll use clear code blocks and ensure everything is self-contained. I'll state how to integrate these changes in the business model.
+> 
+> **Updating logging for external JSON issues**
+> 
+> I need to modify the `_log_external_json_issues` function to change the signature and include `invalid_vals`. If there are no unknown, ignored, or invalid entries, I want to return early. I'll log a warning if invalid keys exist.
+> 
+> Next, I have to extend the model for logging. This class will inherit from the existing log model while adding the new fields for `invalid_keys` and `invalid_payload`. If this log model is new, I should mention that it won’t require inheritance.
+> 
+> For the main external data code, I have a function to get the timezone from the context, with a fallback to "UTC." I should handle invalid timezone names clearly with a validation error.
+> 
+> **Parsing external datetime values**
+> 
+> For the `_parse_external_datetime` function, I see I need to handle `ValueError` and `TypeError` gracefully. If the conversion fails within the nested try, raising a `ValidationError` with the relevant field and value details is okay since using `from` in Odoo lets me maintain the original exception context.
+> 
+> In `_external_date_to_orm_string`, I initially check if the value is a `datetime` or `date`, but I think I can simplify it. If the value isn’t directly parsable with `fields.Date.to_date`, then using `dateutil_parser` can effectively handle ISO datetimes without timezone. It's okay that dates should retain their original timezone context and not be converted to UTC since they don't inherently contain timezone data.
+> 
+> **Normalizing external date values**
+> 
+> I think I'm on the right track regarding date semantics. If I receive a date like "2026-06-05T23:00:00-02:00", it converts to "2026-06-06" in UTC, but I shouldn't convert it since the date field serves a specific semantic purpose. This point is worth mentioning.
+> 
+> In my `_normalize_external_json_field_value`, if `external_datetime_to_utc` is set to false, I can simply return the value. I should also check for non-JSON serializable errors, which might happen when using safe JSON dumps.
+> 
+> For my `write` method, if the data isn’t "clean," I return true rather than raising an error, since improper data may hinder writing.
+> 
+> **Focusing on the write method**
+> 
+> I need to clarify that if there are missing required fields, the `create` method won't work properly. Instead, I should keep my focus primarily on the `write` method or mention that `create` is optional.
+> 
+> In the implementation, if the context isn't safe, I should handle all-time fields correctly. For the `write` method, I can mention that if the user insists on applying changes to all writes, they'll need to make several adjustments.
+> 
+> I also want to provide an explanation that Odoo usually handles UTC server formats. To ensure I'm thorough, I'll cite Odoo's official function for timestamp formatting and the specifics around potential bugs with naive datetime parsing.
+> 
+> **Clarifying date and time handling**
+> 
+> I think `isoparse` supports both ISO-8601 formats with a separator of 'T' or space, as the documentation suggests it can work with various single characters. To be safer for Odoo server formats, I'll opt for `dateutil_parser.parse` since it offers more flexibility, especially for external JSON data. However, I need to be cautious with ambiguous local formats like "06/05/2026," which could lead to incorrect parsing.
+> 
+> It seems best to use `isoparse` first and then convert to Odoo's server format with `fields.Datetime.to_datetime`. For strings with timezones, `isoparse` should handle formats like `+0800` and `+08:00`. 
+> 
+> Also, if the API returns Unix timestamps, I should be able to support that. Lastly, I’ll note that the Odoo client automatically converts timezones without citations in the code comments, keeping it tidy.
+> 
+> **Overriding the write method**
+> 
+> I need to clarify that it's best not to use `fields.Datetime.context_timestamp()` for converting dates before saving. One option is to override the `write` method to handle datetime conversion more effectively. 
+> 
+> If the context indicates `safe_external_json`, I can skip conversion. Otherwise, if `auto_convert_datetime_to_utc` is set, I'll proceed to convert the datetime values to UTC using a new method `_convert_datetime_vals_to_utc`.
+> 
+> This method can handle time conversions flexibly, and I'll ensure not to normalize the values twice in safe code. It’s also essential to mention that while handling date types, there's no timezone information for date fields.
+> 
+> **Handling timezone conversions**
+> 
+> In Odoo, I need to remember that the timezone conversion expects naive UTC timestamps, as specified in the official documentation. There’s a possible issue with `fields.Date.to_date` when parsing timestamps like "2026-06-05T10:00:00+08:00," so I might want to use `dateutil` as a fallback.
+> 
+> For my final answer, I'll add a method to check if a time value is empty and implement a strategy for handling time zones, ensuring I provide clear error messages when there's ambiguity. Using `dt.utcoffset()` could raise an error if `tzinfo` is `None`, but I think this should work out fine!
+> 
+> **Logging and handling exceptions**
+> 
+> I think there’s a need to ensure that exceptions like ValidationErrors are properly caught and logged. In my `_sanitize` method, if the strict context is false, it can swallow validation. But if it's strict, I should re-raise the error. 
+> 
+> I also need to consider logging using the `ir.logging` model if I'm not using a database log. It’s important to use `sudo()` when logging, so failures don’t block the process. For payload example, I should ensure that the logged times correctly show UTC conversions, and I’ll note any specifics regarding external APIs and their timezone settings.
+> 
+> **Clarifying date handling in Odoo**
+> 
+> It's important to emphasize that date fields should only contain dates and not be affected by timezone shifts, like changes in the day. I want to make sure to cite sources accurately, like stating that Odoo 18 accepts date/datetime objects and that datetimes are stored in UTC, with client-side conversion handling.
+> 
+> I should mention in my explanation that the `context_timestamp` method shouldn't be used for writing, as it converts UTC timestamps to client timezone. The citations need to be precise, and it’s okay to refer to the same source multiple times. I’ll check the length and ensure it fits the requirements while ensuring my coding examples don’t have citations embedded. Finally, I’ll provide additional insight in Chinese about the logging model.
+> 
+> **Addressing Odoo datetime handling**
+> 
+> I see a potential issue with using the `Odoo 18 fields.Datetime.to_datetime` helper as mentioned in the documentation, so I need to make sure to cite it in my text using CommonMark Markdown.
+> 
+> To enhance the previous "safe JSON filtering," I should add a "field value normalization" step: convert external JSON to UTC server format for datetime fields before calling `super().write()`.
+> 
+> I can check datetime types without manual maintenance by using `self._fields[field_name].type == "datetime." Finally, it's wise to ensure the logging doesn’t break if the user's previous log model lacks certain fields, as it now creates them properly.
+> 
+> **Clarifying model inheritance and logging**
+> 
+> I’m working on some code, and it starts with extending the `external.payload.issue.log` model, but if that model doesn’t exist, `_inherit` will fail. I should present this clearly, mentioning that if the user continues from the previous logging model, they just need to add fields. If the model isn’t created yet, it can be merged into the original model.
+> 
+> Also, when defining the `ExternalData` class, I should use `_name` instead of `_inherit` if it’s defined in the same class. Additionally, I need to ensure that my `_sanitize_external_json_vals` method refers to the prior `_get_external_json_writable_fields`.
+> 
+> The logging function `_log_external_json_issues` needs to handle unknown and invalid values robustly, and I should use `safe_json_dumps`, including help with that if it’s not already defined. That way, the logging proceeds smoothly without unnecessary extensions.
+> 
+> **Handling invalid fields in JSON**
+> 
+> I need to include an optional extension for invalid fields while ensuring that the log method checks them. The function `safe_json_dumps` will handle serialization with the default `str`.
+> 
+> In `_sanitize`, I’m handling the case where the key isn’t a string by adding it to `unknown_vals`. I should note that JSON object keys should always be strings.
+> 
+> If the key is writable, I’ll try normalizing the external JSON field value. If it raises an exception, I’ll store it in `invalid_vals` and consider the context. It’s crucial to note that non-datetime values might still normalize correctly. 
+> 
+> In `_normalize_external_json_field_value`, I'll check if the field type is `datetime` and if `external_datetime_to_utc` is enabled. For dates, I want normalization to align with server format, even if `external_datetime_to_utc` is set to False. Thus, I may keep normalization for dates regardless, turning them into strings as necessary.
+> 
+> **Managing datetime conversions**
+> 
+> I need to check if the field type is "datetime" and if the context allows for converting to UTC. If datetime conversion is disabled, the function should return the value directly, while ensuring any strings are in a proper format.
+> 
+> In `_external_date_to_orm_string`, if the value is empty, I’ll handle that. For cases where the value is a datetime, I’ll convert it to a string using `fields.Date.to_string` to avoid timezone information.
+> 
+> For handling strings, I’ll want to parse those and catch any exceptions. If all fails, I’ll raise a `ValidationError`. 
+> 
+> In `_parse_external_datetime`, if `dateutil_parser.isoparse` fails, I’ll then use `fields.Datetime.to_datetime`. It’s good to prioritize the more flexible dateutil first.
+> 
+> **Structuring datetime handling**
+> 
+> I need to make sure that if the value is a date and not a datetime, the function returns midnight. If it’s an unsupported type, I’ll raise a ValidationError with the appropriate message indicating its type.
+> 
+> In `_attach_external_tz`, I’m localizing the datetime with the appropriate timezone fetched from an external source. If there’s an AmbiguousTimeError, I’ll handle that by implementing a strategy.
+> 
+> For `_external_datetime_to_utc_orm_string`, if parsing fails, it should return False.
+> 
+> I want to provide clear guidance in my draft for final answers, including warnings, code examples, usage instructions, behavior examples, and notes, with citations placed after every relevant paragraph.
+> 
+> **Clarifying Odoo 18 datetime handling**
+> 
+> In Odoo 18, datetime values are stored in UTC. The documentation specifies that valid inputs include date and datetime objects, server format strings, or False/None. Plus, the `Date` and `Datetime` classes provide helpful methods like `to_date()` and `to_datetime()`.
+> 
+> I should emphasize that using `fields.Datetime.context_timestamp()` for conversion before writing data isn’t advisable, as it's used to convert UTC naive datetimes into the client's timezone for display purposes.
+> 
+> I also need to ensure that if I reference the "dateutil parser," it doesn't need a citation since it's part of the internal code. It's worth noting that Odoo employs `timestamp without timezone` columns, which could be cited. Additionally, API values with offsets convert automatically due to the code, so no citation is required there.
+
+可以实现。建议把流程改成：
+
+**外部 JSON → 字段白名单过滤 → 对 `fields.Datetime` 字段统一转 UTC → 调用 `super().write()`**
+
+注意：Odoo 18 的 `Datetime` 字段本来就是按 **UTC** 存储，客户端显示时再按用户时区转换；并且 Odoo ORM 对 Date/Datetime 支持 Python `date/datetime`、服务端格式字符串、`False/None` 等值。因此这个转换逻辑最好只对**外部 API 同步入口**开启，避免 Odoo 界面或内部代码写入时被二次转换。([odoo.com](https://www.odoo.com/documentation/18.0/developer/reference/backend/orm.html?utm_source=openai))
+
+---
+
+## 1. 核心思路
+
+- `fields.Datetime`：自动转成 UTC 后再写入。
+- `fields.Date`：**不要转 UTC**，因为 Date 没有时区，只做格式归一化。
+- 外部 API 如果传了时区，例如：
+
+```text
+2026-06-05T12:30:00+08:00
+2026-06-05T04:30:00Z
+```
+
+则按它自带的时区转 UTC。
+
+- 外部 API 如果传的是无时区时间，例如：
+
+```text
+2026-06-05 12:30:00
+```
+
+则需要你通过 `context` 告诉系统这个时间属于哪个时区，例如：
+
+```python
+external_source_tz="Asia/Shanghai"
+```
+
+---
+
+## 2. 给日志模型增加转换失败字段
+
+如果你沿用上一个方案里的日志模型，可以加两个字段：
+
+```python
+class ExternalPayloadIssueLog(models.Model):
+    _inherit = "external.payload.issue.log"
+
+    invalid_keys = fields.Text(string="Invalid / Conversion Error Keys")
+    invalid_payload = fields.Text(string="Invalid / Conversion Error Payload")
+```
+
+如果你还没建日志模型，就把这两个字段直接加进原来的 `external.payload.issue.log` 模型里。
+
+---
+
+## 3. 在业务模型中增加时间转换方法
+
+下面代码可以放到你的业务模型里，例如 `x.external.data`。
+
+```python
+# -*- coding: utf-8 -*-
+import json
+import logging
+from datetime import date, datetime, time
+
+import pytz
+from dateutil import parser as dateutil_parser
+
+from odoo import api, fields, models, _
+from odoo.exceptions import ValidationError
+
+_logger = logging.getLogger(__name__)
+
+
+def safe_json_dumps(value, max_length=20000):
+    text = json.dumps(value, ensure_ascii=False, default=str, indent=2)
+    if len(text) > max_length:
+        return text[:max_length] + "\n... truncated ..."
+    return text
+
+
+class ExternalData(models.Model):
+    _inherit = "x.external.data"  # 改成你的模型名
+
+    @api.model
+    def _is_empty_external_time_value(self, value):
+        return value is False or value is None or (
+            isinstance(value, str) and not value.strip()
+        )
+
+    @api.model
+    def _get_external_source_tz(self):
+        """
+        外部 API 未携带时区信息时，默认认为它是什么时区。
+
+        推荐调用 write/create 时显式传：
+            with_context(external_source_tz="Asia/Shanghai")
+
+        如果你的外部 API 无时区时间本身就是 UTC，则使用默认 UTC 即可。
+        """
+        tz_name = self.env.context.get("external_source_tz") or "UTC"
+
+        try:
+            return pytz.timezone(tz_name)
+        except pytz.UnknownTimeZoneError:
+            raise ValidationError(_("Invalid external_source_tz: %s") % tz_name)
+
+    @api.model
+    def _parse_external_datetime(self, value, field_name):
+        """
+        将外部传入的 datetime 值解析为 Python datetime。
+
+        支持：
+        - datetime 对象
+        - date 对象，按当天 00:00:00 处理
+        - Odoo 服务端格式：YYYY-MM-DD HH:MM:SS
+        - ISO8601：2026-06-05T12:30:00+08:00 / 2026-06-05T04:30:00Z
+        """
+        if self._is_empty_external_time_value(value):
+            return False
+
+        if isinstance(value, datetime):
+            return value
+
+        if isinstance(value, date):
+            return datetime.combine(value, time.min)
+
+        if isinstance(value, str):
+            text = value.strip()
+
+            # 优先解析 ISO8601，包括 Z、+08:00 等时区信息
+            try:
+                return dateutil_parser.isoparse(text)
+            except Exception:
+                pass
+
+            # 回退到 Odoo 的 Datetime 解析
+            try:
+                return fields.Datetime.to_datetime(text)
+            except Exception as exc:
+                raise ValidationError(
+                    _("Invalid datetime value for field '%(field)s': %(value)s")
+                    % {
+                        "field": field_name,
+                        "value": value,
+                    }
+                ) from exc
+
+        raise ValidationError(
+            _("Unsupported datetime value type for field '%(field)s': %(type)s")
+            % {
+                "field": field_name,
+                "type": type(value).__name__,
+            }
+        )
+
+    @api.model
+    def _localize_external_naive_datetime(self, dt_value, field_name):
+        """
+        对无时区 datetime 添加外部 API 来源时区。
+
+        默认策略：
+        - 正常情况：按 external_source_tz 本地化
+        - 夏令时不存在时间 / 歧义时间：默认抛错并记录日志
+
+        如果你确实要处理 DST 歧义，可通过 context 指定：
+            external_datetime_dst_strategy="standard"
+        或：
+            external_datetime_dst_strategy="dst"
+        """
+        source_tz = self._get_external_source_tz()
+
+        try:
+            return source_tz.localize(dt_value, is_dst=None)
+
+        except pytz.AmbiguousTimeError as exc:
+            strategy = self.env.context.get("external_datetime_dst_strategy", "raise")
+
+            if strategy == "standard":
+                return source_tz.localize(dt_value, is_dst=False)
+
+            if strategy == "dst":
+                return source_tz.localize(dt_value, is_dst=True)
+
+            raise ValidationError(
+                _(
+                    "Ambiguous datetime value for field '%(field)s' "
+                    "in timezone '%(tz)s': %(value)s"
+                )
+                % {
+                    "field": field_name,
+                    "tz": source_tz.zone,
+                    "value": dt_value,
+                }
+            ) from exc
+
+        except pytz.NonExistentTimeError as exc:
+            raise ValidationError(
+                _(
+                    "Non-existent datetime value for field '%(field)s' "
+                    "in timezone '%(tz)s': %(value)s"
+                )
+                % {
+                    "field": field_name,
+                    "tz": source_tz.zone,
+                    "value": dt_value,
+                }
+            ) from exc
+
+    @api.model
+    def _external_datetime_to_utc_orm_string(self, value, field_name):
+        """
+        将外部 datetime 值转换为 Odoo ORM 推荐的 UTC 字符串格式：
+            YYYY-MM-DD HH:MM:SS
+
+        注意：
+        - 如果 value 自带时区，直接按自带时区转 UTC。
+        - 如果 value 没有时区，按 context['external_source_tz'] 解释。
+        """
+        dt_value = self._parse_external_datetime(value, field_name)
+
+        if not dt_value:
+            return False
+
+        if dt_value.tzinfo is None or dt_value.utcoffset() is None:
+            aware_dt = self._localize_external_naive_datetime(dt_value, field_name)
+        else:
+            aware_dt = dt_value
+
+        utc_naive_dt = aware_dt.astimezone(pytz.UTC).replace(tzinfo=None)
+
+        return fields.Datetime.to_string(utc_naive_dt)
+
+    @api.model
+    def _external_date_to_orm_string(self, value, field_name):
+        """
+        Date 字段不做 UTC 转换，只归一化为 YYYY-MM-DD。
+        """
+        if self._is_empty_external_time_value(value):
+            return False
+
+        if isinstance(value, datetime):
+            return fields.Date.to_string(value.date())
+
+        if isinstance(value, date):
+            return fields.Date.to_string(value)
+
+        if isinstance(value, str):
+            text = value.strip()
+
+            try:
+                parsed_date = fields.Date.to_date(text)
+                if parsed_date:
+                    return fields.Date.to_string(parsed_date)
+            except Exception:
+                pass
+
+            try:
+                parsed_dt = dateutil_parser.isoparse(text)
+                return fields.Date.to_string(parsed_dt.date())
+            except Exception as exc:
+                raise ValidationError(
+                    _("Invalid date value for field '%(field)s': %(value)s")
+                    % {
+                        "field": field_name,
+                        "value": value,
+                    }
+                ) from exc
+
+        raise ValidationError(
+            _("Unsupported date value type for field '%(field)s': %(type)s")
+            % {
+                "field": field_name,
+                "type": type(value).__name__,
+            }
+        )
+
+    @api.model
+    def _normalize_external_json_field_value(self, field_name, value):
+        """
+        针对外部 JSON 的单个字段值做归一化。
+        """
+        field = self._fields.get(field_name)
+
+        if not field:
+            return value
+
+        # Datetime 字段：自动转 UTC
+        if field.type == "datetime":
+            if self.env.context.get("external_datetime_to_utc", True):
+                return self._external_datetime_to_utc_orm_string(value, field_name)
+            return value
+
+        # Date 字段：只做日期格式归一化，不做 UTC 转换
+        if field.type == "date":
+            return self._external_date_to_orm_string(value, field_name)
+
+        return value
+```
+
+---
+
+## 4. 修改你的 `_sanitize_external_json_vals`
+
+把你之前的过滤方法改成这个版本。重点是：字段匹配成功后，不是直接塞进 `clean_vals`，而是先调用 `_normalize_external_json_field_value()`。
+
+```python
+@api.model
+def _sanitize_external_json_vals(self, vals):
+    if not isinstance(vals, dict):
+        raise ValidationError(_("External JSON payload must be a dict."))
+
+    writable_fields = self._get_external_json_writable_fields()
+
+    clean_vals = {}
+    unknown_vals = {}
+    ignored_known_vals = {}
+    invalid_vals = {}
+
+    for key, value in vals.items():
+        if not isinstance(key, str):
+            unknown_vals[str(key)] = value
+            continue
+
+        if key in writable_fields:
+            try:
+                clean_vals[key] = self._normalize_external_json_field_value(key, value)
+            except Exception as exc:
+                invalid_vals[key] = {
+                    "value": value,
+                    "error": str(exc),
+                }
+
+                # 严格模式：时间转换失败就直接报错
+                if self.env.context.get("external_datetime_strict"):
+                    raise
+
+        elif key in self._fields:
+            ignored_known_vals[key] = value
+        else:
+            unknown_vals[key] = value
+
+    return clean_vals, unknown_vals, ignored_known_vals, invalid_vals
+```
+
+---
+
+## 5. 修改日志方法
+
+```python
+def _log_external_json_issues(
+    self,
+    operation,
+    raw_vals,
+    unknown_vals,
+    ignored_known_vals,
+    invalid_vals=None,
+):
+    invalid_vals = invalid_vals or {}
+
+    if not unknown_vals and not ignored_known_vals and not invalid_vals:
+        return
+
+    unknown_keys = sorted(unknown_vals.keys())
+    ignored_known_keys = sorted(ignored_known_vals.keys())
+    invalid_keys = sorted(invalid_vals.keys())
+
+    _logger.warning(
+        "External JSON sanitized: model=%s, ids=%s, operation=%s, "
+        "unknown_keys=%s, ignored_known_keys=%s, invalid_keys=%s",
+        self._name,
+        self.ids,
+        operation,
+        unknown_keys,
+        ignored_known_keys,
+        invalid_keys,
+    )
+
+    try:
+        Log = self.env["external.payload.issue.log"].sudo()
+
+        log_vals = {
+            "model_name": self._name,
+            "res_ids": ",".join(map(str, self.ids)) if self.ids else False,
+            "operation": operation,
+            "unknown_keys": ", ".join(unknown_keys),
+            "ignored_known_keys": ", ".join(ignored_known_keys),
+            "unknown_payload": safe_json_dumps(unknown_vals),
+            "ignored_known_payload": safe_json_dumps(ignored_known_vals),
+            "raw_payload": safe_json_dumps(raw_vals),
+        }
+
+        # 如果你已经给日志模型加了 invalid 字段，则写入
+        if "invalid_keys" in Log._fields:
+            log_vals["invalid_keys"] = ", ".join(invalid_keys)
+
+        if "invalid_payload" in Log._fields:
+            log_vals["invalid_payload"] = safe_json_dumps(invalid_vals)
+
+        Log.create(log_vals)
+
+    except Exception:
+        _logger.exception("Failed to create external payload issue log.")
+```
+
+---
+
+## 6. 修改 `write`
+
+```python
+def write(self, vals):
+    if not self.env.context.get("safe_external_json"):
+        return super().write(vals)
+
+    clean_vals, unknown_vals, ignored_known_vals, invalid_vals = (
+        self._sanitize_external_json_vals(vals)
+    )
+
+    self._log_external_json_issues(
+        operation="write",
+        raw_vals=vals,
+        unknown_vals=unknown_vals,
+        ignored_known_vals=ignored_known_vals,
+        invalid_vals=invalid_vals,
+    )
+
+    if not clean_vals:
+        return True
+
+    return super().write(clean_vals)
+```
+
+如果你也处理 `create()`，同理把解包参数改成四个：
+
+```python
+clean_vals, unknown_vals, ignored_known_vals, invalid_vals = (
+    self._sanitize_external_json_vals(vals)
+)
+```
+
+---
+
+## 7. 调用示例
+
+假设外部 API 返回的是中国时区时间，但字符串里没有带 `+08:00`：
+
+```python
+payload = {
+    "name": "测试数据",
+    "start_time": "2026-06-05 12:30:00",
+    "end_time": "2026-06-05T15:00:00+08:00",
+    "unknown_api_field": "abc",
+}
+
+record.with_context(
+    safe_external_json=True,
+    external_datetime_to_utc=True,
+    external_source_tz="Asia/Shanghai",
+).write(payload)
+```
+
+写入结果大概是：
+
+```python
+{
+    "start_time": "2026-06-05 04:30:00",
+    "end_time": "2026-06-05 07:00:00",
+}
+```
+
+`unknown_api_field` 不会写入，会进入日志。
+
+---
+
+## 8. 如果外部 API 本身就是 UTC
+
+如果 API 返回：
+
+```json
+{
+  "start_time": "2026-06-05 04:30:00"
+}
+```
+
+并且这个时间本身就是 UTC，只需要：
+
+```python
+record.with_context(
+    safe_external_json=True,
+    external_source_tz="UTC",
+).write(payload)
+```
+
+或者 API 直接返回：
+
+```json
+{
+  "start_time": "2026-06-05T04:30:00Z"
+}
+```
+
+那么代码会识别 `Z` 为 UTC，不会重复偏移。
+
+---
+
+## 9. 不建议用 `context_timestamp()` 做入库转换
+
+`fields.Datetime.context_timestamp()` 的方向是：把 UTC 时间转换成客户端时区时间，主要用于显示或上下文场景，不适合拿来把外部 API 时间转换后入库。入库前你应该做的是：**外部来源时间 → UTC naive datetime/string → `write()`**。([odoo.com](https://www.odoo.com/documentation/18.0/developer/reference/backend/orm.html?utm_source=openai))
+
+核心就是：**只有 `fields.Datetime` 做 UTC 转换，`fields.Date` 不做 UTC 转换；无时区时间必须通过 `external_source_tz` 明确来源时区。**
+
+---
+Learn more:
+1. [ORM API — Odoo 18.0 documentation](https://www.odoo.com/documentation/18.0/developer/reference/backend/orm.html?utm_source=openai)
