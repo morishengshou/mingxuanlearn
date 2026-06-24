@@ -76,6 +76,7 @@ class CfgDirMemory(Scene):
         self.play(FadeIn(explain))
 
         seg_arrows = VGroup()
+        nuls = VGroup()
         for i in range(4):
             start_glyph = buf_text[SEG_START[i]]
             arrow = Arrow(path_slots[i].get_right(),
@@ -89,12 +90,13 @@ class CfgDirMemory(Scene):
                 colon = buf_text[COLON_IDX[i]]
                 nul = Text("\\0", font="Consolas", font_size=22, color=RED).move_to(colon)
                 self.play(FadeOut(colon, scale=0.5), FadeIn(nul, scale=1.5), run_time=0.4)
+                nuls.add(nul)
         self.wait(1)
 
         # ---------- 4. 结论：单块内存，禁止单独 free ----------
         bracket = Brace(buf_rect, DOWN, color=BLUE_B)
-        bracket_txt = bracket.get_text("4 个子串共用这一块内存")
-        bracket_txt.set_color(BLUE_B).scale(0.7)
+        bracket_txt = Text("4 个子串共用这一块内存", font=FONT, font_size=20, color=BLUE_B)
+        bracket_txt.next_to(bracket, DOWN, buff=0.15)
         self.play(GrowFromCenter(bracket), FadeIn(bracket_txt))
         self.wait(0.5)
 
@@ -114,7 +116,7 @@ class CfgDirMemory(Scene):
         free_ok.to_edge(RIGHT, buff=0.4).shift(DOWN * 0.6).scale(0.85)
         self.play(Write(free_ok))
         self.play(Indicate(buf_rect, color=GREEN), Indicate(struct_box, color=GREEN))
-        self.play(FadeOut(VGroup(buf_rect, buf_text, heap_tag, bracket, bracket_txt,
+        self.play(FadeOut(VGroup(buf_rect, buf_text, nuls, heap_tag, bracket, bracket_txt,
                                  seg_arrows, rpv_arrow)),
                   run_time=1)
         self.wait(1.5)
