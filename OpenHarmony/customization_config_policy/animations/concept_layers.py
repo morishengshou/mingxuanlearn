@@ -24,16 +24,18 @@ EXISTS = [True, False, True, True]
 
 
 def make_layer_box(name, color, exists):
-    box = RoundedRectangle(width=6.2, height=0.85, corner_radius=0.12,
+    box = RoundedRectangle(width=6.6, height=0.85, corner_radius=0.12,
                            color=color, fill_color=color, fill_opacity=0.18)
-    label = Text(name, font=FONT, font_size=24, color=WHITE).move_to(box.get_left() + RIGHT * 1.3)
-    full = f"{name}/{REL_PATH}"
-    path = Text(full, font=FONT, font_size=18, color=GREY_A)
-    path.next_to(label, RIGHT, buff=0.3)
-    mark = (Text("文件存在", font=FONT, font_size=16, color=GREEN_B)
-            if exists else Text("无此文件", font=FONT, font_size=16, color=GREY_C))
-    mark.move_to(box.get_right() + LEFT * 0.9)
-    return VGroup(box, label, path, mark)
+    # 左：层目录名（等宽字体）
+    label = Text(name, font="Consolas", font_size=24, color=WHITE)
+    label.next_to(box.get_left(), RIGHT, buff=0.45)
+    # 右：状态徽标（小圆点 + 文字），与层名分置两端，不再重叠
+    dot = Dot(radius=0.08, color=(GREEN_B if exists else GREY_C))
+    status = Text("有此文件" if exists else "无此文件",
+                  font=FONT, font_size=20, color=(GREEN_B if exists else GREY_C))
+    badge = VGroup(dot, status).arrange(RIGHT, buff=0.15)
+    badge.next_to(box.get_right(), LEFT, buff=0.45)
+    return VGroup(box, label, badge)
 
 
 class LayerLookupOne(Scene):
