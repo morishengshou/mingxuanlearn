@@ -1298,3 +1298,600 @@ deb ${APT_MIRROR}/debian ${VERSION_CODENAME}-updates main contrib non-free non-f
 deb ${APT_MIRROR}/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
 EOF
 ```
+
+# 基础镜像Ubuntu 换ubuntu源
+
+是的，你看得对：**如果你当前使用的 `odoo:18` 官方镜像底层是 Ubuntu，那么我前面给的 Debian 源写法不应该直接使用**，应该换成 **Ubuntu 的 apt 源**。
+
+我也查了一下目前 Docker Hub 上 `odoo:18`/`odoo:18.0` 的镜像层信息，确实显示其基础层是 `ubuntu:noble`，也就是 **Ubuntu 24.04 LTS Noble**；而且 Odoo 官方镜像里曾在构建阶段临时加入过 `noble-pgdg` 的 PostgreSQL apt 源来安装 `postgresql-client`。([hub.docker.com](https://hub.docker.com/layers/library/odoo/18/images/sha256-00fb918672b6087d3ca6bd5e6df975d8f4ee96f4c4720f6cd114cb6fc9a6f474?context=repo&utm_source=openai))
+
+所以结论是：
+
+> **如果你的基础镜像是 Ubuntu，就必须使用 Ubuntu apt 源；不能用 Debian 的 `bookworm` 源。**
+
+否则可能出现：
+
+- `apt-get update` 报错；
+- 包版本不匹配；
+- 依赖关系损坏；
+- 更严重时会把 Ubuntu 系统混入 Debian 包，导致镜像不可预测。
+
+---
+
+## 推荐做法：自动识别 Ubuntu 版本并写入 Ubuntu 源
+
+下面给你一个更适合 `odoo:18` 官方镜像的 Dockerfile 片段。
+
+以阿里云 Ubuntu 源为例：
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_MIRROR=https://mirrors.aliyun.com
+ARG APT_ALLOWED_HOST=mirrors.aliyun.com
+ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PYPI_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "Detected OS: ${PRETTY_NAME}"; \
+    echo "Detected Ubuntu codename: ${VERSION_CODENAME}"; \
+    test "${ID}" = "ubuntu"; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME}-backports main restricted universe multiverse
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse
+EOF
+
+RUN set -eux; \
+    echo "===== Final apt sources ====="; \
+    cat /etc/apt/sources.list; \
+    echo "===== sources.list.d ====="; \
+    find /etc/apt/sources.list.d -type f -maxdepth 1 -print -exec cat {} \; || true; \
+    if grep -R "^deb " /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | grep -v "${APT_ALLOWED_HOST}"; then \
+        echo "ERROR: Found apt source not using allowed host: ${APT_ALLOWED_HOST}"; \
+        exit 1; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        python3-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libldap2-dev \
+        libsasl2-dev \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        git \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN set -eux; \
+    pip3 install --no-cache-dir \
+        --index-url="${PYPI_INDEX_URL}" \
+        --trusted-host="${PYPI_TRUSTED_HOST}" \
+        -r /tmp/requirements.txt
+
+USER odoo
+```
+
+---
+
+## 如果是 Ubuntu 24.04 Noble，最终源会变成这样
+
+如果 `/etc/os-release` 中：
+
+```text
+VERSION_CODENAME=noble
+```
+
+那么 Dockerfile 会生成：
+
+```text
+deb https://mirrors.aliyun.com/ubuntu/ noble main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ noble-updates main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ noble-backports main restricted universe multiverse
+deb https://mirrors.aliyun.com/ubuntu/ noble-security main restricted universe multiverse
+```
+
+这是 Ubuntu 源写法，不是 Debian 源写法。
+
+---
+
+## 清华源写法
+
+如果你使用清华源：
+
+```yaml
+build:
+  context: .
+  dockerfile: Dockerfile
+  args:
+    APT_MIRROR: https://mirrors.tuna.tsinghua.edu.cn
+    APT_ALLOWED_HOST: mirrors.tuna.tsinghua.edu.cn
+    PYPI_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+    PYPI_TRUSTED_HOST: pypi.tuna.tsinghua.edu.cn
+```
+
+生成的 Ubuntu apt 源就是：
+
+```text
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-updates main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-backports main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ noble-security main restricted universe multiverse
+```
+
+---
+
+## docker-compose.yml 示例
+
+```yaml
+services:
+  db:
+    image: postgres:15
+    container_name: odoo18-db
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+    volumes:
+      - odoo18-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  odoo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: https://mirrors.aliyun.com
+        APT_ALLOWED_HOST: mirrors.aliyun.com
+        PYPI_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+        PYPI_TRUSTED_HOST: mirrors.aliyun.com
+    image: my-odoo:18
+    container_name: odoo18-web
+    depends_on:
+      - db
+    ports:
+      - "8069:8069"
+    environment:
+      HOST: db
+      USER: odoo
+      PASSWORD: odoo
+    volumes:
+      - odoo18-web-data:/var/lib/odoo
+      - ./config:/etc/odoo
+      - ./addons:/mnt/extra-addons
+    restart: unless-stopped
+
+volumes:
+  odoo18-db-data:
+  odoo18-web-data:
+```
+
+---
+
+## 更通用：同时兼容 Ubuntu 和 Debian
+
+如果你希望 Dockerfile 将来即使官方镜像切回 Debian 也能用，可以写成自动判断版本。
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_MIRROR=https://mirrors.aliyun.com
+ARG APT_ALLOWED_HOST=mirrors.aliyun.com
+ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PYPI_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "Detected OS: ${PRETTY_NAME}"; \
+    echo "ID=${ID}"; \
+    echo "VERSION_CODENAME=${VERSION_CODENAME}"; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    if [ "${ID}" = "ubuntu" ]; then \
+        cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME} main restricted universe multiverse
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME}-updates main restricted universe multiverse
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME}-backports main restricted universe multiverse
+deb ${APT_MIRROR}/ubuntu/ ${VERSION_CODENAME}-security main restricted universe multiverse
+EOF
+    elif [ "${ID}" = "debian" ]; then \
+        cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME} main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME}-updates main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+    else \
+        echo "Unsupported base OS: ${ID}"; \
+        exit 1; \
+    fi
+
+RUN set -eux; \
+    echo "===== Final apt sources ====="; \
+    cat /etc/apt/sources.list; \
+    if grep -R "^deb " /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | grep -v "${APT_ALLOWED_HOST}"; then \
+        echo "ERROR: Found apt source not using allowed host: ${APT_ALLOWED_HOST}"; \
+        exit 1; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        python3-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libldap2-dev \
+        libsasl2-dev \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        git \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN set -eux; \
+    pip3 install --no-cache-dir \
+        --index-url="${PYPI_INDEX_URL}" \
+        --trusted-host="${PYPI_TRUSTED_HOST}" \
+        -r /tmp/requirements.txt
+
+USER odoo
+```
+
+不过这个通用写法有一个前提：
+
+> `APT_MIRROR` 这个镜像站同时提供 `/ubuntu/` 和 `/debian/` 路径。
+
+例如阿里云、清华、中科大通常都支持。但如果你是公司内部源，可能需要把 Ubuntu 和 Debian 的源地址分成两个参数。
+
+---
+
+## 更适合公司内网源的写法
+
+如果你的公司内网源是这样的：
+
+```text
+https://apt.example.internal/ubuntu
+```
+
+建议 Dockerfile 直接用 `APT_UBUNTU_MIRROR`：
+
+```dockerfile
+ARG APT_UBUNTU_MIRROR=https://mirrors.aliyun.com/ubuntu
+```
+
+然后：
+
+```dockerfile
+RUN set -eux; \
+    . /etc/os-release; \
+    test "${ID}" = "ubuntu"; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME} main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-updates main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-backports main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-security main restricted universe multiverse
+EOF
+```
+
+完整示例：
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_UBUNTU_MIRROR=https://mirrors.aliyun.com/ubuntu
+ARG APT_ALLOWED_HOST=mirrors.aliyun.com
+ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PYPI_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "Detected OS: ${PRETTY_NAME}"; \
+    test "${ID}" = "ubuntu"; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME} main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-updates main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-backports main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-security main restricted universe multiverse
+EOF
+
+RUN set -eux; \
+    echo "===== Final apt sources ====="; \
+    cat /etc/apt/sources.list; \
+    if grep -R "^deb " /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | grep -v "${APT_ALLOWED_HOST}"; then \
+        echo "ERROR: Found apt source not using allowed host: ${APT_ALLOWED_HOST}"; \
+        exit 1; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        python3-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libldap2-dev \
+        libsasl2-dev \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        git \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN set -eux; \
+    pip3 install --no-cache-dir \
+        --index-url="${PYPI_INDEX_URL}" \
+        --trusted-host="${PYPI_TRUSTED_HOST}" \
+        -r /tmp/requirements.txt
+
+USER odoo
+```
+
+对应 `docker-compose.yml`：
+
+```yaml
+services:
+  odoo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APT_UBUNTU_MIRROR: https://mirrors.aliyun.com/ubuntu
+        APT_ALLOWED_HOST: mirrors.aliyun.com
+        PYPI_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+        PYPI_TRUSTED_HOST: mirrors.aliyun.com
+    image: my-odoo:18
+```
+
+---
+
+## 关于 `/etc/apt/sources.list.d/ubuntu.sources`
+
+Ubuntu 24.04 很可能使用新的 deb822 格式源文件，例如：
+
+```text
+/etc/apt/sources.list.d/ubuntu.sources
+```
+
+格式类似：
+
+```text
+Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: noble noble-updates noble-backports
+Components: main universe restricted multiverse
+```
+
+所以如果你只改：
+
+```dockerfile
+/etc/apt/sources.list
+```
+
+可能不够，因为原来的 `ubuntu.sources` 还在，`apt-get update` 仍然可能访问官方源。
+
+因此推荐使用：
+
+```dockerfile
+rm -rf /etc/apt/sources.list.d/*
+```
+
+然后重新写入你自己的 `/etc/apt/sources.list`。
+
+这也是前面 Dockerfile 中要清空整个 `/etc/apt/sources.list.d/` 的原因。
+
+---
+
+## 是否需要保留 PostgreSQL PGDG 源？
+
+一般不需要。
+
+你现在的容器架构是：
+
+- `odoo` 容器：运行 Odoo
+- `postgres:15` 容器：运行 PostgreSQL 服务
+
+Odoo 容器里通常只需要 PostgreSQL 客户端库或客户端工具，例如：
+
+```text
+libpq-dev
+libpq5
+postgresql-client
+```
+
+Odoo 官方镜像已经在构建阶段处理过 `postgresql-client`。Docker Hub 镜像层信息也显示，官方构建时临时加入 `apt.postgresql.org` 的 `noble-pgdg` 源安装 PostgreSQL 客户端后又删除了这个源文件。([hub.docker.com](https://hub.docker.com/layers/library/odoo/18.0/images/sha256-85bce4c080759e0c675a2615a42dce86f1b3649d8bcc4a0b6dbf9215af8d2bac?utm_source=openai))
+
+所以你的自定义 Dockerfile 里一般不用再添加：
+
+```text
+apt.postgresql.org
+```
+
+除非你明确需要安装特定版本的 `postgresql-client-15` 或其他 PGDG 包。
+
+如果你确实需要 PGDG，也应该使用你指定的 PGDG 镜像源，例如：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/postgresql/repos/apt/
+```
+
+而不是官方 `apt.postgresql.org`。
+
+但对于大多数 Odoo 模块依赖安装场景，不建议额外引入 PGDG 源。
+
+---
+
+## 如何验证基础镜像到底是 Ubuntu 还是 Debian？
+
+你可以直接运行：
+
+```bash
+docker run --rm odoo:18 cat /etc/os-release
+```
+
+如果看到：
+
+```text
+ID=ubuntu
+VERSION_CODENAME=noble
+```
+
+就应该使用 Ubuntu apt 源。
+
+也可以查看当前 apt 源：
+
+```bash
+docker run --rm odoo:18 bash -c "cat /etc/apt/sources.list || true; find /etc/apt/sources.list.d -type f -maxdepth 1 -print -exec cat {} \;"
+```
+
+---
+
+## 如何验证你的自定义镜像只用了指定 Ubuntu 源？
+
+构建时使用：
+
+```bash
+docker compose build --no-cache odoo
+```
+
+观察日志中 `apt-get update` 部分，应类似：
+
+```text
+Get:1 https://mirrors.aliyun.com/ubuntu noble InRelease
+Get:2 https://mirrors.aliyun.com/ubuntu noble-updates InRelease
+Get:3 https://mirrors.aliyun.com/ubuntu noble-backports InRelease
+Get:4 https://mirrors.aliyun.com/ubuntu noble-security InRelease
+```
+
+不应该出现：
+
+```text
+archive.ubuntu.com
+security.ubuntu.com
+apt.postgresql.org
+deb.debian.org
+```
+
+构建完成后进入容器：
+
+```bash
+docker run --rm -it my-odoo:18 bash
+```
+
+检查源：
+
+```bash
+cat /etc/apt/sources.list
+find /etc/apt/sources.list.d -type f -maxdepth 1 -print -exec cat {} \;
+```
+
+检查包来源：
+
+```bash
+apt-get update
+apt-cache policy libxml2-dev
+```
+
+应该看到来源是你的镜像站，例如：
+
+```text
+https://mirrors.aliyun.com/ubuntu noble/main amd64 Packages
+```
+
+---
+
+## 最终建议
+
+你的情况应该改成：
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_UBUNTU_MIRROR=https://mirrors.aliyun.com/ubuntu
+ARG APT_ALLOWED_HOST=mirrors.aliyun.com
+ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PYPI_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    test "${ID}" = "ubuntu"; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME} main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-updates main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-backports main restricted universe multiverse
+deb ${APT_UBUNTU_MIRROR} ${VERSION_CODENAME}-security main restricted universe multiverse
+EOF
+
+RUN set -eux; \
+    cat /etc/apt/sources.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        python3-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libldap2-dev \
+        libsasl2-dev \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        git \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN pip3 install --no-cache-dir \
+    --index-url="${PYPI_INDEX_URL}" \
+    --trusted-host="${PYPI_TRUSTED_HOST}" \
+    -r /tmp/requirements.txt
+
+USER odoo
+```
+
+也就是说：**是的，应该换成 Ubuntu 的 apt 源，并且建议根据 `/etc/os-release` 自动读取 `VERSION_CODENAME`，不要写死 Debian 的 `bookworm`。**
+
+---
+Learn more:
+1. [Image Layer Details - odoo:18](https://hub.docker.com/layers/library/odoo/18/images/sha256-00fb918672b6087d3ca6bd5e6df975d8f4ee96f4c4720f6cd114cb6fc9a6f474?context=repo&utm_source=openai)
+2. [Image Layer Details - odoo:18.0](https://hub.docker.com/layers/library/odoo/18.0/images/sha256-85bce4c080759e0c675a2615a42dce86f1b3649d8bcc4a0b6dbf9215af8d2bac?utm_source=openai)
