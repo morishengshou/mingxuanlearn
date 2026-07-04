@@ -809,3 +809,492 @@ USER odoo
 docker compose build
 docker compose up -d
 ```
+
+# 严格APT源
+
+不能说**绝对保证**。我上一个方案里那种简单写法：
+
+```dockerfile
+rm -f /etc/apt/sources.list.d/*.sources
+cat > /etc/apt/sources.list <<EOF
+...
+EOF
+```
+
+在多数基于 Debian 的官方镜像里可以工作，但要想**更严格地保证只从你指定的 apt 源安装**，需要注意几个点：
+
+1. **必须清理或覆盖所有 apt 源配置**
+2. **不能只改 `/etc/apt/sources.list`**
+3. **还要处理 `/etc/apt/sources.list.d/` 目录下的 `.list` 和 `.sources` 文件**
+4. **最好在构建时验证最终 apt 源**
+5. **如有第三方源、Odoo 源、PostgreSQL 源，也要明确是否保留**
+6. **apt 的安全源路径通常和普通 Debian 源路径不完全一样**
+
+---
+
+# 推荐的严格写法
+
+如果你的目标是：**Odoo 镜像构建过程中所有 apt 包都只从指定 Debian 镜像站获取**，可以这样写。
+
+下面以阿里云源为例。
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG DEBIAN_CODENAME=bookworm
+ARG APT_MIRROR=https://mirrors.aliyun.com
+
+RUN set -eux; \
+    rm -f /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*.list; \
+    rm -f /etc/apt/sources.list.d/*.sources; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/debian ${DEBIAN_CODENAME} main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian ${DEBIAN_CODENAME}-updates main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian-security ${DEBIAN_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+
+RUN set -eux; \
+    echo "===== Current apt sources ====="; \
+    cat /etc/apt/sources.list; \
+    echo "===== sources.list.d ====="; \
+    ls -la /etc/apt/sources.list.d || true; \
+    apt-get update
+
+RUN set -eux; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        python3-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libldap2-dev \
+        libsasl2-dev \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        git \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PYPI_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    pip3 install --no-cache-dir \
+        --index-url="${PYPI_INDEX_URL}" \
+        --trusted-host="${PYPI_TRUSTED_HOST}" \
+        -r /tmp/requirements.txt
+
+USER odoo
+```
+
+这比单纯 `sed` 替换更可靠。
+
+---
+
+# 但这里有一个重要问题：Odoo 官方镜像里可能有额外 apt 源
+
+官方 `odoo:18` 镜像在构建时可能已经使用过一些源，并且镜像内可能存在额外的 apt 源配置，例如：
+
+```text
+/etc/apt/sources.list.d/
+```
+
+里面可能有：
+
+```text
+debian.sources
+odoo.list
+pgdg.list
+```
+
+或者其他文件。
+
+如果你执行：
+
+```dockerfile
+rm -f /etc/apt/sources.list.d/*.list
+rm -f /etc/apt/sources.list.d/*.sources
+```
+
+那么确实可以避免后续 `apt-get update` 访问这些源。
+
+但是也意味着：
+
+- 如果你后续安装的包依赖某些第三方仓库里的包，可能会安装失败
+- 如果官方镜像里有 Odoo 自己的 apt 源，你会把它移除
+- 但对于“安装 Debian 系统依赖”来说，这通常没问题
+
+---
+
+# 更稳妥：自动识别 Debian 版本
+
+不建议把 `bookworm` 写死。可以从 `/etc/os-release` 读取系统代号。
+
+改成这样更好：
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_MIRROR=https://mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "Detected Debian codename: ${VERSION_CODENAME}"; \
+    rm -f /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*.list; \
+    rm -f /etc/apt/sources.list.d/*.sources; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME} main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME}-updates main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+
+RUN set -eux; \
+    echo "===== /etc/os-release ====="; \
+    cat /etc/os-release; \
+    echo "===== /etc/apt/sources.list ====="; \
+    cat /etc/apt/sources.list; \
+    echo "===== /etc/apt/sources.list.d ====="; \
+    find /etc/apt/sources.list.d -type f -maxdepth 1 -print -exec cat {} \; || true; \
+    apt-get update
+```
+
+这样即使以后 `odoo:18` 的基础 Debian 版本发生变化，也不容易因为写死 `bookworm` 而出错。
+
+---
+
+# 更严格：构建时检查 apt-get update 是否访问了非指定源
+
+如果你想在 Docker build 阶段直接失败，可以做一个检查。
+
+例如只允许访问 `mirrors.aliyun.com`：
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_MIRROR=https://mirrors.aliyun.com
+ARG APT_ALLOWED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    rm -f /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/*.list; \
+    rm -f /etc/apt/sources.list.d/*.sources; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME} main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME}-updates main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+
+RUN set -eux; \
+    echo "Checking apt sources..."; \
+    grep -R "^deb " /etc/apt/sources.list /etc/apt/sources.list.d || true; \
+    if grep -R "^deb " /etc/apt/sources.list /etc/apt/sources.list.d | grep -v "${APT_ALLOWED_HOST}"; then \
+        echo "ERROR: Found apt source not using ${APT_ALLOWED_HOST}"; \
+        exit 1; \
+    fi; \
+    apt-get update
+```
+
+这样如果有任何 `deb` 源不是指定域名，构建会失败。
+
+不过注意，Debian 新格式 `.sources` 文件里不一定是 `deb ...` 这种格式，所以如果你已经删除了 `.sources` 文件，这个检查就够用了。
+
+---
+
+# 更严格：使用 apt 配置禁止其他源文件
+
+你也可以显式地把源列表目录清干净，并只保留一个文件：
+
+```dockerfile
+RUN set -eux; \
+    mkdir -p /etc/apt/sources.list.d; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    rm -f /etc/apt/sources.list
+```
+
+然后再写入：
+
+```dockerfile
+RUN set -eux; \
+    . /etc/os-release; \
+    cat > /etc/apt/sources.list <<EOF
+deb https://mirrors.aliyun.com/debian ${VERSION_CODENAME} main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian ${VERSION_CODENAME}-updates main contrib non-free non-free-firmware
+deb https://mirrors.aliyun.com/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+```
+
+---
+
+# 最推荐 Dockerfile 片段
+
+我建议你用下面这个版本。
+
+```dockerfile
+FROM odoo:18
+
+USER root
+
+ARG APT_MIRROR=https://mirrors.aliyun.com
+ARG APT_ALLOWED_HOST=mirrors.aliyun.com
+ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PYPI_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN set -eux; \
+    . /etc/os-release; \
+    echo "Detected OS: ${PRETTY_NAME}"; \
+    echo "Detected codename: ${VERSION_CODENAME}"; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME} main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME}-updates main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+
+RUN set -eux; \
+    echo "===== Final apt sources ====="; \
+    cat /etc/apt/sources.list; \
+    if grep -R "^deb " /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null | grep -v "${APT_ALLOWED_HOST}"; then \
+        echo "ERROR: Found apt source not using allowed host: ${APT_ALLOWED_HOST}"; \
+        exit 1; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        python3-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libldap2-dev \
+        libsasl2-dev \
+        libssl-dev \
+        libffi-dev \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+        git \
+        curl \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN set -eux; \
+    pip3 install --no-cache-dir \
+        --index-url="${PYPI_INDEX_URL}" \
+        --trusted-host="${PYPI_TRUSTED_HOST}" \
+        -r /tmp/requirements.txt
+
+USER odoo
+```
+
+---
+
+# docker-compose.yml 中传参
+
+```yaml
+services:
+  odoo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: https://mirrors.aliyun.com
+        APT_ALLOWED_HOST: mirrors.aliyun.com
+        PYPI_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+        PYPI_TRUSTED_HOST: mirrors.aliyun.com
+    image: my-odoo:18
+```
+
+---
+
+# 如果你使用清华源
+
+```yaml
+args:
+  APT_MIRROR: https://mirrors.tuna.tsinghua.edu.cn
+  APT_ALLOWED_HOST: mirrors.tuna.tsinghua.edu.cn
+  PYPI_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+  PYPI_TRUSTED_HOST: pypi.tuna.tsinghua.edu.cn
+```
+
+对应 apt 会生成：
+
+```text
+deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm main contrib non-free non-free-firmware
+deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main contrib non-free non-free-firmware
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware
+```
+
+---
+
+# 但是要注意：这只能保证“你后续 apt install 阶段”
+
+还有一个边界需要明确：
+
+## 1. 不能改变官方基础镜像已经做过的事
+
+你写：
+
+```dockerfile
+FROM odoo:18
+```
+
+意味着 `odoo:18` 这个镜像在官方构建时已经安装了很多软件包。
+
+你现在只能控制：
+
+```dockerfile
+FROM odoo:18
+之后的 apt-get update / apt-get install
+```
+
+不能控制官方镜像在它自己的构建阶段用了哪个源。
+
+如果你需要从最底层完全可控，那就不能直接基于 `odoo:18`，而要：
+
+- 基于 Debian 官方镜像自己构建 Odoo 运行环境
+- 或复制 Odoo 官方 Dockerfile 并修改其中 apt 源
+
+但大多数业务场景没必要做到这个程度。
+
+---
+
+## 2. apt 包本身可能来自缓存吗？
+
+在 Docker build 中，如果某一层被缓存，`apt-get install` 可能不会重新执行。
+
+如果你想确保当前构建确实重新从指定源拉取，可以使用：
+
+```bash
+docker compose build --no-cache odoo
+```
+
+或者：
+
+```bash
+docker build --no-cache -t my-odoo:18 .
+```
+
+---
+
+## 3. apt 依赖不会从 PyPI 镜像来
+
+Python 依赖和 apt 依赖是两套机制：
+
+- `apt-get install` 用 Debian apt 源
+- `pip install` 用 PyPI 源
+
+所以需要分别指定。
+
+---
+
+# 怎么验证实际用了哪个 apt 源？
+
+构建时你会看到类似日志：
+
+```text
+Get:1 https://mirrors.aliyun.com/debian bookworm InRelease
+Get:2 https://mirrors.aliyun.com/debian bookworm-updates InRelease
+Get:3 https://mirrors.aliyun.com/debian-security bookworm-security InRelease
+```
+
+也可以进入构建后的容器验证：
+
+```bash
+docker run --rm -it my-odoo:18 bash
+```
+
+查看源：
+
+```bash
+cat /etc/apt/sources.list
+find /etc/apt/sources.list.d -type f -maxdepth 1 -print -exec cat {} \;
+```
+
+查看某个包候选来源：
+
+```bash
+apt-cache policy libxml2-dev
+```
+
+你应该看到类似：
+
+```text
+500 https://mirrors.aliyun.com/debian bookworm/main amd64 Packages
+```
+
+---
+
+# 如果你要“只允许访问内网 apt 源”
+
+如果你有公司内网源，例如：
+
+```text
+https://apt.example.internal/debian
+```
+
+可以这样：
+
+```yaml
+args:
+  APT_MIRROR: https://apt.example.internal
+  APT_ALLOWED_HOST: apt.example.internal
+  PYPI_INDEX_URL: https://pypi.example.internal/simple
+  PYPI_TRUSTED_HOST: pypi.example.internal
+```
+
+Dockerfile 不用改。
+
+如果你希望网络层也强制禁止访问外部，可以结合：
+
+- Docker build 网络策略
+- 企业防火墙
+- CI/CD runner 出口网络限制
+- 只允许访问内网镜像站
+
+因为 Dockerfile 里的检查只能检查 apt 配置，不能防止某个安装脚本绕过 apt 去访问外网。
+
+---
+
+# 结论
+
+如果你采用下面这些措施：
+
+1. 删除 `/etc/apt/sources.list`
+2. 清空 `/etc/apt/sources.list.d/*`
+3. 重新写入唯一的 apt 源
+4. 构建时检查源文件中是否存在非指定域名
+5. 使用 `docker compose build --no-cache`
+6. 必要时用网络策略限制外网访问
+
+那么可以保证：**你在自定义 Dockerfile 中执行的 `apt-get update` 和 `apt-get install` 基本只会从你指定的 apt 镜像站获取软件包。**
+
+最核心的片段是：
+
+```dockerfile
+RUN set -eux; \
+    . /etc/os-release; \
+    rm -f /etc/apt/sources.list; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    cat > /etc/apt/sources.list <<EOF
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME} main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian ${VERSION_CODENAME}-updates main contrib non-free non-free-firmware
+deb ${APT_MIRROR}/debian-security ${VERSION_CODENAME}-security main contrib non-free non-free-firmware
+EOF
+```
